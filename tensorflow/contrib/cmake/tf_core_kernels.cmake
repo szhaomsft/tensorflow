@@ -160,16 +160,6 @@ if(WIN32)
       # not working on windows yet
       "${tensorflow_source_dir}/tensorflow/core/kernels/neon/*"
       # not in core - those are loaded dynamically as dll
-      "${tensorflow_source_dir}/tensorflow/contrib/nearest_neighbor/kernels/hyperplane_lsh_probes.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/nearest_neighbor/ops/nearest_neighbor_ops.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/resampler/kernels/resampler_ops.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/rnn/kernels/blas_gemm.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/rnn/kernels/gru_ops.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/rnn/kernels/lstm_ops.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/rnn/ops/gru_ops.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/rnn/ops/lstm_ops.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/seq2seq/kernels/beam_search_ops.cc"
-      "${tensorflow_source_dir}/tensorflow/contrib/seq2seq/ops/beam_search_ops.cc"
       # temporarily disable nccl (nccl itself needs to be ported to windows first)
       "${tensorflow_source_dir}/tensorflow/contrib/nccl/kernels/nccl_manager.cc"
       "${tensorflow_source_dir}/tensorflow/contrib/nccl/kernels/nccl_ops.cc"
