@@ -94,6 +94,10 @@ tf_cuda_library(
             "//tensorflow/core:protos_all_cc",
             "//tensorflow/core:lib",
             "//tensorflow/core:lib_internal",
+            "//tensorflow/contrib/rnn:gru_ops_op_lib",
+            "//tensorflow/contrib/rnn:lstm_ops_op_lib",
+            "//tensorflow/contrib/rnn:gru_ops_kernels",
+            "//tensorflow/contrib/rnn:lstm_ops_kernels",            
         ],
     }) + select({
         "//tensorflow:with_xla_support": [
