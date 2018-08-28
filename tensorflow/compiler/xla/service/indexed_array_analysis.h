@@ -265,8 +265,20 @@ class IndexedArrayAnalysis {
 
   StatusOr<Array*> ComputeArrayForGather(
       const Shape& shape, const GatherDimensionNumbers& dim_numbers,
-      tensorflow::gtl::ArraySlice<int64> window_bounds, Array* source,
+      tensorflow::gtl::ArraySlice<int64> slice_sizes, Array* source,
       Array* indices);
+
+  StatusOr<Array*> ComputeArrayForDotWithIndexedLhs(
+      const Shape& shape, const DotDimensionNumbers& dim_numbers,
+      ScalarIndexedConstantArray* lhs, ConstantArray* rhs);
+
+  StatusOr<Array*> ComputeArrayForDotWithIndexedRhs(
+      const Shape& shape, const DotDimensionNumbers& dim_numbers,
+      ConstantArray* lhs, ScalarIndexedConstantArray* rhs);
+
+  StatusOr<Array*> ComputeArrayForDot(const Shape& shape,
+                                      const DotDimensionNumbers& dim_numbers,
+                                      Array* lhs, Array* rhs);
 
   // This tries to fold a ScalarIndexedArray which has another
   // ScalarIndexedArray as a source into a ScalarIndexedArray that instead has a
@@ -359,7 +371,7 @@ class IndexedArrayAnalysis {
 // unconditionally add to the regular HLO pass pipeline.
 class IndexedArrayAnalysisPrinterPass : public HloPassInterface {
  public:
-  tensorflow::StringPiece name() const override;
+  absl::string_view name() const override;
   StatusOr<bool> Run(HloModule* module) override;
 };
 

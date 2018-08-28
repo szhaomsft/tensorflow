@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os as _os
+import platform as _platform
 import subprocess as _subprocess
 import tempfile as _tempfile
 
@@ -26,6 +27,7 @@ from tensorflow.contrib.lite.python import lite_constants
 from tensorflow.contrib.lite.toco import model_flags_pb2 as _model_flags_pb2
 from tensorflow.contrib.lite.toco import toco_flags_pb2 as _toco_flags_pb2
 from tensorflow.python.platform import resource_loader as _resource_loader
+from tensorflow.python.util import deprecation
 from tensorflow.python.util.lazy_loader import LazyLoader
 
 
@@ -54,7 +56,7 @@ def toco_convert_protos(model_flags_str, toco_flags_str, input_data_str):
   """Convert `input_data_str` according to model and toco parameters.
 
   Unless you know what you are doing consider using
-  the more friendly @{tf.contrib.lite.toco_convert}}.
+  the more friendly `tf.contrib.lite.toco_convert`.
 
   Args:
     model_flags_str: Serialized proto describing model properties, see
@@ -90,12 +92,13 @@ def toco_convert_protos(model_flags_str, toco_flags_str, input_data_str):
         fp_output.name
     ]
     cmdline = " ".join(cmd)
+    is_windows = _platform.system() == "Windows"
     proc = _subprocess.Popen(
         cmdline,
         shell=True,
         stdout=_subprocess.PIPE,
         stderr=_subprocess.STDOUT,
-        close_fds=True)
+        close_fds=not is_windows)
     stdout, stderr = proc.communicate()
     exitcode = proc.returncode
     if exitcode == 0:
@@ -115,6 +118,7 @@ def build_toco_convert_protos(input_tensors,
                               inference_type=lite_constants.FLOAT,
                               inference_input_type=None,
                               input_format=lite_constants.TENSORFLOW_GRAPHDEF,
+                              input_shapes=None,
                               output_format=lite_constants.TFLITE,
                               quantized_input_stats=None,
                               default_ranges_stats=None,
@@ -141,6 +145,8 @@ def build_toco_convert_protos(input_tensors,
       Must be `{FLOAT, QUANTIZED_UINT8}`. (default `inference_type`)
     input_format: Type of data to read Currently must be
       `{TENSORFLOW_GRAPHDEF}`. (default TENSORFLOW_GRAPHDEF)
+    input_shapes: Input array shape. It needs to be a list of the same length
+      as `input_tensors`, or None. (default None)
     output_format: Output file format. Currently must be `{TFLITE,
       GRAPHVIZ_DOT}`. (default TFLITE)
     quantized_input_stats: List of tuples of integers representing the mean and
@@ -209,14 +215,19 @@ def build_toco_convert_protos(input_tensors,
     if inference_type == lite_constants.QUANTIZED_UINT8:
       input_array.mean_value, input_array.std_value = quantized_input_stats[idx]
     input_array.name = tensor_name(input_tensor)
-    input_array.shape.dims.extend(map(int, input_tensor.get_shape()))
+    if input_shapes is None:
+      shape = input_tensor.get_shape()
+    else:
+      shape = input_shapes[idx]
+    input_array.shape.dims.extend(map(int, shape))
 
   for output_tensor in output_tensors:
     model.output_arrays.append(tensor_name(output_tensor))
   return model, toco
 
 
-def toco_convert(input_data, input_tensors, output_tensors, *args, **kwargs):
+def toco_convert_impl(input_data, input_tensors, output_tensors, *args,
+                      **kwargs):
   """"Convert a model using TOCO.
 
   Typically this function is used to convert from TensorFlow GraphDef to TFLite.
@@ -245,3 +256,30 @@ def toco_convert(input_data, input_tensors, output_tensors, *args, **kwargs):
                              toco_flags.SerializeToString(),
                              input_data.SerializeToString())
   return data
+
+
+@deprecation.deprecated(None, "Use `lite.TocoConverter` instead.")
+def toco_convert(input_data, input_tensors, output_tensors, *args, **kwargs):
+  """"Convert a model using TOCO.
+
+  Typically this function is used to convert from TensorFlow GraphDef to TFLite.
+  Conversion can be customized by providing arguments that are forwarded to
+  `build_toco_convert_protos` (see documentation for details).
+
+  Args:
+    input_data: Input data (i.e. often `sess.graph_def`),
+    input_tensors: List of input tensors. Type and shape are computed using
+      `foo.get_shape()` and `foo.dtype`.
+    output_tensors: List of output tensors (only .name is used from this).
+    *args: See `build_toco_convert_protos`,
+    **kwargs: See `build_toco_convert_protos`.
+
+  Returns:
+    The converted data. For example if TFLite was the destination, then
+    this will be a tflite flatbuffer in a bytes array.
+
+  Raises:
+    Defined in `build_toco_convert_protos`.
+  """
+  return toco_convert_impl(input_data, input_tensors, output_tensors, *args,
+                           **kwargs)

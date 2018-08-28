@@ -17,7 +17,10 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
 import gc
+import os
+import pickle
 
 import numpy as np
 
@@ -105,6 +108,34 @@ class ResourceVariableOpsTest(test_util.TensorFlowTestCase):
     with context.eager_mode():
       v = resource_variable_ops.ResourceVariable(False, name="bool_test")
       self.assertAllEqual(bool(v), False)
+
+  def testEagerDeepCopy(self):
+    with context.eager_mode():
+      init_value = np.ones((4, 4, 4))
+      variable = resource_variable_ops.ResourceVariable(init_value,
+                                                        name="init")
+
+      copied_variable = copy.deepcopy(variable)
+      copied_variable.assign(4 * np.ones((4, 4, 4)))
+
+      # Copying the variable should create a new underlying tensor with distinct
+      # values.
+      self.assertFalse(np.allclose(variable.numpy(), copied_variable.numpy()))
+
+  def testGraphDeepCopy(self):
+    with self.test_session():
+      init_value = np.ones((4, 4, 4))
+      variable = resource_variable_ops.ResourceVariable(init_value,
+                                                        name="init")
+      with self.assertRaises(NotImplementedError):
+        copy.deepcopy(variable)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testStridedSliceAssign(self):
+    v = resource_variable_ops.ResourceVariable([1.0, 2.0])
+    self.evaluate(variables.global_variables_initializer())
+    self.evaluate(v[0].assign(2.0))
+    self.assertAllEqual(self.evaluate(v), [2.0, 2.0])
 
   def testDifferentAssignGraph(self):
     with ops.Graph().as_default():
@@ -233,6 +264,18 @@ class ResourceVariableOpsTest(test_util.TensorFlowTestCase):
     read = resource_variable_ops.read_variable_op(handle, dtype=dtypes.int32)
     self.assertEqual(self.evaluate(read), [[5]])
 
+  def testEagerPickle(self):
+    with context.eager_mode():
+      tmp_dir = self.get_temp_dir()
+      fname = os.path.join(tmp_dir, "var.pickle")
+      with open(fname, "wb") as f:
+        v = resource_variable_ops.ResourceVariable(10.0)
+        pickle.dump(v, f)
+
+      with open(fname, "rb") as f:
+        v = pickle.load(f)
+        self.assertAllEqual(v.numpy(), 10.0)
+
   @test_util.run_in_graph_and_eager_modes
   def testScatterDiv(self):
     handle = resource_variable_ops.var_handle_op(
@@ -245,6 +288,15 @@ class ResourceVariableOpsTest(test_util.TensorFlowTestCase):
             handle, [0], constant_op.constant([[3]], dtype=dtypes.int32)))
     read = resource_variable_ops.read_variable_op(handle, dtype=dtypes.int32)
     self.assertEqual(self.evaluate(read), [[2]])
+
+  def testUseResource(self):
+    v = variables.Variable(1.0, use_resource=True)
+    self.assertTrue(isinstance(v, resource_variable_ops.ResourceVariable))
+
+  def testEagerNoUseResource(self):
+    with context.eager_mode():
+      v = variables.Variable(1.0)
+      self.assertTrue(isinstance(v, resource_variable_ops.ResourceVariable))
 
   @test_util.run_in_graph_and_eager_modes
   def testScatterMin(self):
@@ -826,6 +878,12 @@ class ResourceVariableOpsTest(test_util.TensorFlowTestCase):
       state_ops.scatter_add(v, [1], [3])
       self.assertAllEqual([1.0, 5.0], v.numpy())
 
+  def testScatterSubStateOps(self):
+    with context.eager_mode():
+      v = resource_variable_ops.ResourceVariable([1.0, 2.0], name="sub")
+      state_ops.scatter_sub(v, [1], [3])
+      self.assertAllEqual([1.0, -1.0], v.numpy())
+
   def testScatterNdAddStateOps(self):
     with context.eager_mode():
       v = resource_variable_ops.ResourceVariable(
@@ -850,6 +908,63 @@ class ResourceVariableOpsTest(test_util.TensorFlowTestCase):
     # eager execution (where the error is realized during kernel execution).
     with self.assertRaisesRegexp(Exception, r"shape.*2.*3"):
       state_ops.scatter_update(v, [0, 1], [0, 1, 2])
+
+
+class _MixedPrecisionVariableTest(test_util.TensorFlowTestCase):
+
+  @test_util.run_in_graph_and_eager_modes()
+  def test_dense_var_to_tensor_read_dtype_same_as_var_dtype(self):
+    # read_dtype is same as dtype
+    v = resource_variable_ops.ResourceVariable(1.0, dtype=dtypes.float32)
+    v = resource_variable_ops._MixedPrecisionVariable(v, dtypes.float32)
+    if not context.executing_eagerly():
+      v.initializer.run()
+
+    # dtype is not read_dtype, return NotImplemented
+    self.assertEqual(
+        NotImplemented, v._dense_var_to_tensor(dtype=dtypes.float16))
+    self.assertEqual(NotImplemented,
+                     v._dense_var_to_tensor(dtype=dtypes.float16, as_ref=True))
+
+    # as_ref is False
+    t = v._dense_var_to_tensor(as_ref=False)
+    self.assertTrue(isinstance(t, ops.Tensor))
+    self.assertEqual(t.dtype, dtypes.float32)
+    self.assertEqual(self.evaluate(t), 1.0)
+
+    t = v._dense_var_to_tensor(dtype=dtypes.float32, as_ref=False)
+    self.assertTrue(isinstance(t, ops.Tensor))
+    self.assertEqual(t.dtype, dtypes.float32)
+    self.assertEqual(self.evaluate(t), 1.0)
+
+    # as_ref is True
+    self.assertEqual(NotImplemented, v._dense_var_to_tensor(as_ref=True))
+    self.assertEqual(NotImplemented,
+                     v._dense_var_to_tensor(dtype=dtypes.float32, as_ref=True))
+
+  @test_util.run_in_graph_and_eager_modes()
+  def test_dense_var_to_tensor_read_dtype_different_from_var_dtype(self):
+    # read_dtype is different from dtype
+    v = resource_variable_ops.ResourceVariable(1.0, dtype=dtypes.float32)
+    v = resource_variable_ops._MixedPrecisionVariable(v, dtypes.float16)
+    if not context.executing_eagerly():
+      v.initializer.run()
+
+    # as_ref is False
+    t = v._dense_var_to_tensor(as_ref=False)
+    self.assertTrue(isinstance(t, ops.Tensor))
+    self.assertEqual(t.dtype, dtypes.float16)
+    self.assertEqual(self.evaluate(t), 1.0)
+
+    t = v._dense_var_to_tensor(dtype=dtypes.float16, as_ref=False)
+    self.assertTrue(isinstance(t, ops.Tensor))
+    self.assertEqual(t.dtype, dtypes.float16)
+    self.assertEqual(self.evaluate(t), 1.0)
+
+    # as_ref is True
+    self.assertEqual(NotImplemented, v._dense_var_to_tensor(as_ref=True))
+    self.assertEqual(NotImplemented,
+                     v._dense_var_to_tensor(dtype=dtypes.float16, as_ref=True))
 
 
 if __name__ == "__main__":

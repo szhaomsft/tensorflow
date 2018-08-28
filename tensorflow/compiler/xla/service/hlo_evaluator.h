@@ -18,11 +18,12 @@ limitations under the License.
 
 #include <memory>
 
-#include "tensorflow/compiler/xla/ptr_util.h"
+#include "absl/memory/memory.h"
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
+#include "tensorflow/compiler/xla/service/shape_inference.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
@@ -115,6 +116,10 @@ class HloEvaluator : public DfsHloVisitorWithDefault {
   StatusOr<std::unique_ptr<Literal>> EvaluateElementwiseUnaryOp(
       HloOpcode opcode, const Literal& operand);
 
+  StatusOr<std::unique_ptr<Literal>> EvaluateDotOp(
+      const DotDimensionNumbers& dim_numbers, const Literal& lhs,
+      const Literal& rhs);
+
  protected:
   // Make HloEvaluatorTypedVisitor a friend because it is logically part of this
   // class.
@@ -172,6 +177,8 @@ class HloEvaluator : public DfsHloVisitorWithDefault {
 
   Status HandleSelect(HloInstruction* select) override;
 
+  Status HandleTupleSelect(HloInstruction* tuple_select) override;
+
   Status HandleBroadcast(HloInstruction* broadcast) override;
 
   Status HandleAfterAll(HloInstruction* token) override;
@@ -215,11 +222,11 @@ class HloEvaluator : public DfsHloVisitorWithDefault {
       return Unimplemented(
           "Implicit broadcasting is currently unsupported in HLO evaluator "
           "Shape Mismatch: %s vs %s",
-          ShapeUtil::HumanString(shape).c_str(),
-          ShapeUtil::HumanString(operand->shape()).c_str());
+          ShapeUtil::HumanString(shape),
+          ShapeUtil::HumanString(operand->shape()));
     }
 
-    auto result = MakeUnique<Literal>(shape);
+    auto result = absl::make_unique<Literal>(shape);
     TF_RETURN_IF_ERROR(result->Populate<ReturnT>(
         [&](tensorflow::gtl::ArraySlice<int64> multi_index) {
           return unary_op(operand_literal.Get<NativeT>(multi_index));

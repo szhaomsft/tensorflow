@@ -335,7 +335,7 @@ class VariableScopeTest(test.TestCase):
         # reuse=True is for now only supported when eager execution is disabled.
         if not context.executing_eagerly():
           v = variable_scope.get_variable("v",
-                                          [])  # "v" is alredy there, reused
+                                          [])  # "v" is already there, reused
           losses = ops.get_collection(ops.GraphKeys.REGULARIZATION_LOSSES)
           self.assertEqual(3, len(losses))  # No new loss added.
 
@@ -388,6 +388,18 @@ class VariableScopeTest(test.TestCase):
       # If we initialize v0 we should be able to run 'add'.
       sess.run(v0.initializer)
       sess.run(add)
+
+  def testEnableResourceVariables(self):
+    old = variable_scope._DEFAULT_USE_RESOURCE
+    try:
+      variable_scope.enable_resource_variables()
+      self.assertTrue(isinstance(variables_lib.Variable(1.0),
+                                 resource_variable_ops.ResourceVariable))
+      variable_scope.disable_resource_variables()
+      self.assertFalse(isinstance(variables_lib.Variable(1.0),
+                                  resource_variable_ops.ResourceVariable))
+    finally:
+      variable_scope._DEFAULT_USE_RESOURCE = old
 
   def testControlFlow(self):
     with self.test_session() as sess:
@@ -1054,7 +1066,7 @@ class VariableScopeTest(test.TestCase):
           "testGetCollection_foo/testGetCollection_a:0"
       ])
 
-  def testGetTrainableVariables(self):
+  def testGetTrainableVariablesWithGetVariable(self):
     with self.test_session():
       _ = variable_scope.get_variable("testGetTrainableVariables_a", [])
       with variable_scope.variable_scope(
@@ -1062,10 +1074,72 @@ class VariableScopeTest(test.TestCase):
         _ = variable_scope.get_variable("testGetTrainableVariables_b", [])
         _ = variable_scope.get_variable(
             "testGetTrainableVariables_c", [], trainable=False)
+
+        # sync `ON_READ` sets trainable=False
+        _ = variable_scope.get_variable(
+            "testGetTrainableVariables_d", [],
+            synchronization=variable_scope.VariableSynchronization.ON_READ)
         self.assertEqual(
             [v.name for v in scope.trainable_variables()],
-            ["testGetTrainableVariables_foo/"
-             "testGetTrainableVariables_b:0"])
+            ["testGetTrainableVariables_foo/testGetTrainableVariables_b:0"])
+
+        # All other sync values sets trainable=True
+        _ = variable_scope.get_variable(
+            "testGetTrainableVariables_e", [],
+            synchronization=variable_scope.VariableSynchronization.ON_WRITE)
+        self.assertEqual([v.name for v in scope.trainable_variables()], [
+            "testGetTrainableVariables_foo/testGetTrainableVariables_b:0",
+            "testGetTrainableVariables_foo/testGetTrainableVariables_e:0"
+        ])
+
+      with self.assertRaisesRegexp(
+          ValueError, "Synchronization value can be set to "
+          "VariableSynchronization.ON_READ only for non-trainable variables. "
+          "You have specified trainable=True and "
+          "synchronization=VariableSynchronization.ON_READ."):
+        _ = variable_scope.get_variable(
+            "testGetTrainableVariables_e", [],
+            synchronization=variable_scope.VariableSynchronization.ON_READ,
+            trainable=True)
+
+  def testGetTrainableVariablesWithVariable(self):
+    with self.test_session():
+      _ = variable_scope.variable(1.0, name="testGetTrainableVariables_a")
+      with variable_scope.variable_scope(
+          "testGetTrainableVariables_foo") as scope:
+        _ = variable_scope.variable(1.0, name="testGetTrainableVariables_b")
+        _ = variable_scope.variable(
+            1.0, name="testGetTrainableVariables_c", trainable=False)
+
+        # sync `ON_READ` sets trainable=False
+        _ = variable_scope.variable(
+            1.0,
+            name="testGetTrainableVariables_d",
+            synchronization=variable_scope.VariableSynchronization.ON_READ)
+        self.assertEqual(
+            [v.name for v in scope.trainable_variables()],
+            ["testGetTrainableVariables_foo/testGetTrainableVariables_b:0"])
+
+        # All other sync values sets trainable=True
+        _ = variable_scope.variable(
+            1.0,
+            name="testGetTrainableVariables_e",
+            synchronization=variable_scope.VariableSynchronization.ON_WRITE)
+        self.assertEqual([v.name for v in scope.trainable_variables()], [
+            "testGetTrainableVariables_foo/testGetTrainableVariables_b:0",
+            "testGetTrainableVariables_foo/testGetTrainableVariables_e:0"
+        ])
+
+      with self.assertRaisesRegexp(
+          ValueError, "Synchronization value can be set to "
+          "VariableSynchronization.ON_READ only for non-trainable variables. "
+          "You have specified trainable=True and "
+          "synchronization=VariableSynchronization.ON_READ."):
+        _ = variable_scope.variable(
+            1.0,
+            name="testGetTrainableVariables_e",
+            synchronization=variable_scope.VariableSynchronization.ON_READ,
+            trainable=True)
 
   def testGetGlobalVariables(self):
     with self.test_session():
@@ -1253,6 +1327,31 @@ class VariableScopeWithCustomGetterTest(test.TestCase):
     self.assertEqual(v3, v4)
     self.assertEqual(3, called[0])  # skipped one in the first new_scope
 
+  def testSynchronizationAndAggregationWithCustomGetter(self):
+    called = [0]
+    synchronization = variable_scope.VariableSynchronization.AUTO
+    aggregation = variable_scope.VariableAggregation.NONE
+
+    def custom_getter(getter, *args, **kwargs):
+      called[0] += 1
+
+      # Verify synchronization and aggregation kwargs are as expected.
+      self.assertEqual(kwargs["synchronization"], synchronization)
+      self.assertEqual(kwargs["aggregation"], aggregation)
+      return getter(*args, **kwargs)
+
+    with variable_scope.variable_scope("scope", custom_getter=custom_getter):
+      variable_scope.get_variable("v", [1])
+    self.assertEqual(1, called[0])
+
+    with variable_scope.variable_scope("scope", custom_getter=custom_getter):
+      synchronization = variable_scope.VariableSynchronization.ON_READ
+      aggregation = variable_scope.VariableAggregation.MEAN
+      variable_scope.get_variable(
+          "v1", [1], synchronization=synchronization, aggregation=aggregation)
+
+    self.assertEqual(2, called[0])
+
   def testCustomGetterWithReuse(self):
     # Custom getter can choose to behave differently on reused variables.
     def custom_getter(getter, *args, **kwargs):
@@ -1354,6 +1453,23 @@ class VariableScopeWithCustomGetterTest(test.TestCase):
         variable_scope.variable(1.0, name="one_name")
 
     self.assertAllEqual(variable_names, ["forced_name"])
+
+    called = [False]
+
+    def creater_c(next_creator, **kwargs):
+      called[0] = True
+      self.assertEqual(kwargs["synchronization"],
+                       variable_scope.VariableSynchronization.ON_WRITE)
+      self.assertEqual(kwargs["aggregation"],
+                       variable_scope.VariableAggregation.MEAN)
+      return next_creator(**kwargs)
+
+    with variable_scope.variable_creator_scope(creater_c):
+      variable_scope.get_variable(
+          "v", [],
+          synchronization=variable_scope.VariableSynchronization.ON_WRITE,
+          aggregation=variable_scope.VariableAggregation.MEAN)
+    self.assertTrue(called[0])
 
 
 class PartitionInfoTest(test.TestCase):

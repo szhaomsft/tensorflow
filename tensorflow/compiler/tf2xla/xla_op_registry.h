@@ -128,6 +128,9 @@ class XlaOpRegistry {
       const string& compilation_device_name,
       bool include_compilation_only_kernels);
 
+  // Returns all operations for which there are XLA kernels on any device.
+  static std::vector<string> GetAllRegisteredOps();
+
   // Returns the set of compile-time constant inputs to 'op'. Returns nullptr
   // if the op is not registered.
   static const std::unordered_set<string>* CompileTimeConstantInputs(
@@ -279,7 +282,7 @@ class XlaOpRegistrar {
 
 #define REGISTER_XLA_OP_UNIQ(CTR, BUILDER, OP)                                 \
   static ::tensorflow::XlaOpRegistrar xla_op_registrar__body__##CTR##__object( \
-      XlaOpRegistrationBuilder::BUILDER.Build(                                 \
+      ::tensorflow::XlaOpRegistrationBuilder::BUILDER.Build(                   \
           [](::tensorflow::OpKernelConstruction* context)                      \
               -> ::tensorflow::OpKernel* { return new OP(context); }));
 

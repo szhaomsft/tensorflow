@@ -31,6 +31,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/client/client.h"
 #include "tensorflow/compiler/xla/client/client_library.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
+#include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/compiler/xla/legacy_flags/debug_options_flags.h"
 #include "tensorflow/compiler/xla/service/hlo.pb.h"
 #include "tensorflow/compiler/xla/service/service.h"
@@ -77,7 +78,7 @@ int main(int argc, char** argv) {
   tensorflow::port::InitMain(argv[0], &argc, &argv);
 
   tensorflow::gtl::ArraySlice<char*> args(argv, argc);
-  args.pop_front();  // Pop off the binary name, argv[0]
+  args.remove_prefix(1);  // Pop off the binary name, argv[0]
   xla::tools::RealMain(args);
   return 0;
 }

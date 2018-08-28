@@ -20,6 +20,8 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_compilation_device.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
+#include "tensorflow/compiler/xla/client/xla_computation.h"
+#include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/function.h"
@@ -181,6 +183,8 @@ class XlaCompiler {
 
   struct OutputDescription {
     // Type and shape of the output. The shape is the unflattened shape.
+    // When `type` is DT_RESOURCE, `shape` is the shape of the resource
+    // variable's value.
     DataType type;
     TensorShape shape;
 
@@ -188,6 +192,10 @@ class XlaCompiler {
     // 'Tensor' is in host memory.
     bool is_constant = false;
     Tensor constant_value;
+
+    // When this output is a resource, i.e. `type == DT_RESOURCE`, this is
+    // the index of the input that contains the resource.
+    int input_index;
   };
 
   // Describes a variable write side effect of the computation.
@@ -210,9 +218,9 @@ class XlaCompiler {
 
   struct CompilationResult {
     // Vector that maps from the parameters of the XLA computation to their
-    // original argument positions. To handle compile-time constant inputs and
-    // resources, the parameters to the XLA computation may be a subset of the
-    // original arguments, and are not necessarily in the same order.)
+    // original argument positions. To handle compile-time constant inputs, the
+    // parameters to the XLA computation may be a subset of the original
+    // arguments. The relative ordering of parameters are maintained.
     std::vector<int> input_mapping;
 
     // Input shapes of the computation. If we are flattening inputs, these are
@@ -242,12 +250,19 @@ class XlaCompiler {
     std::shared_ptr<xla::XlaComputation> computation;
   };
 
-  typedef std::function<TensorShape(const TensorShape&, DataType)>
+  typedef std::function<xla::StatusOr<TensorShape>(const TensorShape&,
+                                                   DataType)>
       ShapeRepresentationFn;
   struct Options {
     // Name of the compilation device to use. It must be set by the caller.
     // The default empty value is invalid.
     DeviceType device_type = DeviceType("");
+
+    // The device to use during compilation to execute instructions on, for
+    // example for auto-tuning.
+    // Valid values are defined by `xla::Backend::devices_ordinal_supported()`.
+    // -1 indicates the default device should be used.
+    int device_ordinal = -1;
 
     xla::Client* client = nullptr;
 
@@ -322,6 +337,16 @@ class XlaCompiler {
   // computations. Computations that communicate should be compiled with the
   // same XlaCompiler.
   Status GetChannelHandle(const string& key, xla::ChannelHandle* channel);
+
+  // Retrieves the host-to-device channel handle associated with `key`.
+  // Allocates a new channel handle if none exists.
+  Status GetHostToDeviceChannelHandle(const string& key,
+                                      xla::ChannelHandle* channel);
+
+  // Retrieves the device-to-host channel handle associated with `key`.
+  // Allocates a new channel handle if none exists.
+  Status GetDeviceToHostChannelHandle(const string& key,
+                                      xla::ChannelHandle* channel);
 
   // Sets the shapes and types for the device to host transfer associated with
   // 'key'.

@@ -15,10 +15,12 @@ limitations under the License.
 
 #include <memory>
 
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "tensorflow/compiler/xla/array2d.h"
 #include "tensorflow/compiler/xla/array4d.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/tests/client_library_test_base.h"
 #include "tensorflow/compiler/xla/tests/literal_test_util.h"
 #include "tensorflow/compiler/xla/tests/test_macros.h"
@@ -42,11 +44,9 @@ struct ReverseSpec {
   bool use_bfloat16;
 
   string ToTestCaseName() const {
-    return tensorflow::strings::Printf(
-        "reverse_%s_in_dims_%s_%s",
-        tensorflow::str_util::Join(input_dims, "x").c_str(),
-        tensorflow::str_util::Join(reversal, "x").c_str(),
-        use_bfloat16 ? "bf16" : "f32");
+    return absl::StrFormat(
+        "reverse_%s_in_dims_%s_%s", absl::StrJoin(input_dims, "x"),
+        absl::StrJoin(reversal, "x"), use_bfloat16 ? "bf16" : "f32");
   }
 };
 
@@ -82,7 +82,7 @@ TEST_P(FloatReverseTest, Reverses) {
   std::vector<float> input_vector(
       ShapeUtil::ElementsIn(ShapeUtil::MakeShape(F32, spec.input_dims)));
   std::iota(input_vector.begin(), input_vector.end(), 0.0);
-  auto r1_literal = Literal::CreateR1<float>(input_vector);
+  auto r1_literal = LiteralUtil::CreateR1<float>(input_vector);
   auto input_literal = r1_literal->Reshape(spec.input_dims).ConsumeValueOrDie();
 
   XlaBuilder builder(TestName());

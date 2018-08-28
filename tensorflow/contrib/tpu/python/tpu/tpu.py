@@ -42,9 +42,9 @@ _BLACKLISTED_OPS = set([
     "Placeholder",
 ])
 
-# These operations will currently fail to compile, but we should be able to
-# support them eventually via CPU offload or extending our operation set.
-_NOT_IMPLEMENTED_OPS = set([
+# XLA doesn't currently support reading of intermediate tensors, thus some ops
+# are not supported.
+_UNSUPPORTED_OPS = set([
     "AudioSummary",
     "AudioSummaryV2",
     "HistogramSummary",
@@ -149,8 +149,44 @@ class TPUReplicateContext(control_flow_ops.XLAControlFlowContext):
     self._gradient_colocation_stack = []
     self._host_compute_core = []
     self._name = name
+    self._name_as_bytes = compat.as_bytes(name)
     self._unsupported_ops = []
     self._pivot = pivot
+    self._replicated_vars = {}
+
+  def get_replicated_var_handle(self, var):
+    """Returns a variable handle for replicated TPU variable 'var'.
+
+    This is an method used by an experimental replicated variable
+    implementation and is not intended as a public API.
+
+    Args:
+      var: The replicated TPU variable.
+
+    Returns:
+      The handle of the TPU replicated input node.
+    """
+    handle = self._replicated_vars.get(var)
+    if handle is not None:
+      return handle
+
+    # Builds a TPUReplicatedInput node for the variable, if one does not already
+    # exist. The TPUReplicatedInput node must belong to the enclosing
+    # control-flow scope of the TPUReplicateContext.
+    # TODO(phawkins): consider changing the contract of the TPU encapsulation
+    # so the TPUReplicatedInput nodes go inside the TPUReplicateContext scope
+    # instead.
+
+    # pylint: disable=protected-access
+    graph = ops.get_default_graph()
+    saved_context = graph._get_control_flow_context()
+    graph._set_control_flow_context(self.outer_context)
+    handle = tpu_ops.tpu_replicated_input(
+        [v.handle for v in var._vars], name=var.name + "/handle")
+    graph._set_control_flow_context(saved_context)
+    # pylint: enable=protected-access
+    self._replicated_vars[var] = handle
+    return handle
 
   def report_unsupported_operations(self):
     if self._unsupported_ops:
@@ -279,23 +315,22 @@ class TPUReplicateContext(control_flow_ops.XLAControlFlowContext):
       # Capture the device function stack at the time of first entry
       # since that is the stack that will be used outside_compilation.
       graph = ops.get_default_graph()
-      self._outer_device_function_stack = list(graph._device_function_stack)  # pylint: disable=protected-access
+      # pylint: disable=protected-access
+      self._outer_device_function_stack = graph._device_function_stack.copy()
+      # pylint: enable=protected-access
     super(TPUReplicateContext, self).Enter()
 
   def HostComputeCore(self):
     return self._host_compute_core
 
   def AddOp(self, op):
-    self._AddOpInternal(op)
-
-  def _AddOpInternal(self, op):
     # pylint: disable=protected-access
     if op.type in _BLACKLISTED_OPS:
       logging.error("Operation of type %s (%s) is not supported on the TPU. "
                     "Execution will fail if this op is used in the graph. " %
                     (op.type, op.name))
 
-    if op.type in _NOT_IMPLEMENTED_OPS:
+    if op.type in _UNSUPPORTED_OPS:
       self._unsupported_ops.append(op)
 
     if any(x.dtype._is_ref_dtype for x in op.inputs):
@@ -305,7 +340,7 @@ class TPUReplicateContext(control_flow_ops.XLAControlFlowContext):
     if _TPU_REPLICATE_ATTR in op.node_def.attr:
       raise ValueError("TPU computations cannot be nested")
     op._set_attr(_TPU_REPLICATE_ATTR,
-                 attr_value_pb2.AttrValue(s=compat.as_bytes(self._name)))
+                 attr_value_pb2.AttrValue(s=self._name_as_bytes))
     if self._outside_compilation_cluster:
       op._set_attr(
           _OUTSIDE_COMPILATION_ATTR,
@@ -319,11 +354,12 @@ class TPUReplicateContext(control_flow_ops.XLAControlFlowContext):
 
     # Remove any control edges from outer control flow contexts. These may cause
     # mismatched frame errors.
-    control_inputs, external_inputs = self._RemoveExternalControlEdges(op)
+    (internal_control_inputs,
+     external_control_inputs) = self._RemoveExternalControlEdges(op)
 
     if not op.inputs:
       # Add a control edge from the control pivot to this op.
-      if not control_inputs:
+      if not internal_control_inputs:
         # pylint: disable=protected-access
         op._add_control_input(self.GetControlPivot())
         # pylint: enable=protected-access
@@ -334,19 +370,19 @@ class TPUReplicateContext(control_flow_ops.XLAControlFlowContext):
         if real_x != x:
           op._update_input(index, real_x)  # pylint: disable=protected-access
 
-    if external_inputs:
+    if external_control_inputs:
       # Use an identity to pull control inputs as data inputs. Note that we
       # ignore ops which don't have outputs. TODO(phawkins): fix that.
       with ops.control_dependencies(None):
         self.Enter()
-        external_inputs = [
+        external_control_inputs = [
             array_ops.identity(x.outputs[0]).op
-            for x in external_inputs
+            for x in external_control_inputs
             if x.outputs
         ]
         self.Exit()
       # pylint: disable=protected-access
-      op._add_control_inputs(external_inputs)
+      op._add_control_inputs(external_control_inputs)
       # pylint: enable=protected-access
 
     # Mark op's outputs as seen by this context and any outer contexts.
@@ -362,6 +398,7 @@ class TPUReplicateContext(control_flow_ops.XLAControlFlowContext):
       self._outer_context.AddInnerOp(op)
 
   def AddValue(self, val):
+    """Add `val` to the current context and its outer context recursively."""
     if val.name in self._values:
       # Use the real value if it comes from outer context.
       result = self._external_values.get(val.name)
@@ -378,7 +415,7 @@ class TPUReplicateContext(control_flow_ops.XLAControlFlowContext):
     return result
 
   def AddInnerOp(self, op):
-    self._AddOpInternal(op)
+    self.AddOp(op)
     if self._outer_context:
       self._outer_context.AddInnerOp(op)
 
@@ -598,23 +635,14 @@ def split_compile_and_replicate(computation,
     with tpu_function.tpu_shard_context(
         num_replicas), ops.control_dependencies([metadata]):
 
-      # For backward compatibility reasons, we tag replicated inputs with the
-      # _tpu_replicated_input attribute. This does nothing and exists only for
-      # backward compatibility.
-      # TODO(phawkins): delete the attr_scope after 6/28/2018.
-      # pylint: disable=protected-access
-      with graph._attr_scope({
-          "_tpu_replicated_input": attr_value_pb2.AttrValue(b=True)
-      }):
-        # Add identity ops so even unused inputs are "consumed" by the
-        # computation. This is to avoid orphaned TPUReplicatedInput nodes.
-        # TODO(phawkins): consider instead pruning unused TPUReplicatedInput
-        # and eliding trivial TPUReplicatedInput/TPUReplicatedOutput pairs.
-        computation_inputs = [
-            array_ops.identity(x, name="replicated_input_{}".format(i))
-            for i, x in enumerate(computation_inputs)
-        ]
-      # pylint: enable=protected-access
+      # Add identity ops so even unused inputs are "consumed" by the
+      # computation. This is to avoid orphaned TPUReplicatedInput nodes.
+      # TODO(phawkins): consider instead pruning unused TPUReplicatedInput
+      # and eliding trivial TPUReplicatedInput/TPUReplicatedOutput pairs.
+      computation_inputs = [
+          array_ops.identity(x, name="replicated_input_{}".format(i))
+          for i, x in enumerate(computation_inputs)
+      ]
 
       # If there is an infeed queue, adds the dequeued values to the
       # computation's inputs.
@@ -942,8 +970,15 @@ def rewrite(computation,
   Args:
     computation: A Python function that builds a computation to apply
       to the input. If the function takes n inputs, 'inputs' should be
-      a list of n tensors. If the function returns m outputs, rewrite
-      will return a list of m tensors.
+      a list of n tensors.
+
+      `computation` may return a list of operations and tensors.  Tensors must
+      come before operations in the returned list.  The return value of
+      `rewrite` is a list of tensors corresponding to the tensors from the
+      from `computation`.
+
+      All `Operation`s returned from `computation` will be executed when
+      evaluating any of the returned output tensors.
     inputs: A list of input tensors or `None` (equivalent to an empty list).
     infeed_queue: If not `None`, the `InfeedQueue` from which to append a tuple
       of arguments as inputs to `computation`.
@@ -978,6 +1013,19 @@ _BLACKLISTED_INFERENCE_OPS = set([
     "Variable",
     "VariableV2",
 ])
+
+
+def under_tpu_inference_context():
+  """Check if it is currently under `tpu.rewrite_for_inference()`."""
+  graph = ops.get_default_graph()
+
+  context = graph._get_control_flow_context()  # pylint: disable=protected-access
+  while context:
+    if isinstance(context, _TPUInferenceContext):
+      return True
+    context = context.outer_context
+
+  return False
 
 
 class _TPUInferenceContext(control_flow_ops.XLAControlFlowContext):

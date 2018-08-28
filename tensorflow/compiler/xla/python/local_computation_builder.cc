@@ -14,9 +14,10 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/python/local_computation_builder.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
+#include "absl/memory/memory.h"
+#include "tensorflow/compiler/xla/client/lib/math.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/executable_run_options.h"
-#include "tensorflow/compiler/xla/ptr_util.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 
@@ -136,8 +137,7 @@ static StatusOr<ScopedShapedBuffer> ToBuffer(LocalClient* client,
 
 /* static */
 StatusOr<LocalShapedBuffer*> LocalShapedBuffer::FromLiteral(
-    const Literal& argument,
-    const tensorflow::gtl::optional<Shape>& shape_with_layout) {
+    const Literal& argument, const absl::optional<Shape>& shape_with_layout) {
   LocalClient* client = GetOrCreateLocalClient();
   StatusOr<ScopedShapedBuffer> buf = [&] {
     if (shape_with_layout) {
@@ -162,7 +162,7 @@ CompiledLocalComputation::CompiledLocalComputation(
 
 StatusOr<std::unique_ptr<Literal>> CompiledLocalComputation::Execute(
     const std::vector<Literal>& arguments,
-    const std::vector<tensorflow::gtl::optional<Shape>>& shapes_with_layout) {
+    const std::vector<absl::optional<Shape>>& shapes_with_layout) {
   LocalClient* client = GetOrCreateLocalClient();
 
   VLOG(1) << "Execution requested with " << GetReplicaCount() << " replicas.";
@@ -193,7 +193,7 @@ StatusOr<std::unique_ptr<Literal>> CompiledLocalComputation::Execute(
             scoped_buffers.reserve(arguments.size());
             for (int i = 0; i < arguments.size(); ++i) {
               const Literal& argument = arguments[i];
-              const tensorflow::gtl::optional<Shape>& shape_with_layout =
+              const absl::optional<Shape>& shape_with_layout =
                   shapes_with_layout[i];
 
               StatusOr<ScopedShapedBuffer> pushed;
@@ -251,7 +251,7 @@ StatusOr<std::unique_ptr<Literal>> CompiledLocalComputation::Execute(
       return InternalError(
           "Failed running replica %d (other replicas may have failed as well): "
           "%s.",
-          replica, statusor.status().ToString().c_str());
+          replica, statusor.status().ToString());
     }
   }
 
@@ -485,6 +485,11 @@ LocalOp LocalComputationBuilder::ConvertElementType(
   return xla::ConvertElementType(operand.op(), new_element_type);
 }
 
+LocalOp LocalComputationBuilder::BitcastConvertType(
+    const LocalOp& operand, PrimitiveType new_element_type) {
+  return xla::BitcastConvertType(operand.op(), new_element_type);
+}
+
 LocalOp LocalComputationBuilder::Call(
     const LocalComputation& local_computation,
     tensorflow::gtl::ArraySlice<LocalOp> operands) {
@@ -569,6 +574,16 @@ StatusOr<bool> LocalComputationBuilder::IsConstant(const LocalOp& operand) {
   return builder_.IsConstant(operand.op());
 }
 
+LocalOp LocalComputationBuilder::Sort(const LocalOp& operand, int64 dimension) {
+  return xla::Sort(operand.op(), absl::nullopt, dimension);
+}
+
+LocalOp LocalComputationBuilder::SortKeyVal(const LocalOp& keys,
+                                            const LocalOp& values,
+                                            int64 dimension) {
+  return xla::Sort(keys.op(), values.op(), dimension);
+}
+
 StatusOr<LocalComputation*> LocalComputationBuilder::BuildConstantSubGraph(
     const LocalOp& operand) {
   TF_ASSIGN_OR_RETURN(XlaComputation computation,
@@ -613,6 +628,12 @@ _FORWARD_BINOP(Min)
 _FORWARD_BINOP(And)
 _FORWARD_BINOP(Or)
 _FORWARD_BINOP(Xor)
+_FORWARD_BINOP(ShiftLeft)
+_FORWARD_BINOP(ShiftRightArithmetic)
+_FORWARD_BINOP(ShiftRightLogical)
+_FORWARD_BINOP(Atan2)
+_FORWARD_BINOP(Pow)
+_FORWARD_BINOP(Complex)
 _FORWARD_UNOP(Not)
 _FORWARD_UNOP(Abs)
 _FORWARD_UNOP(Exp)
@@ -626,13 +647,29 @@ _FORWARD_UNOP(Sign)
 _FORWARD_UNOP(Cos)
 _FORWARD_UNOP(Sin)
 _FORWARD_UNOP(Tanh)
-_FORWARD_UNOP(SqrtF32)
-_FORWARD_UNOP(SquareF32)
-_FORWARD_BINOP(Pow)
 _FORWARD_UNOP(IsFinite)
-_FORWARD_UNOP(ReciprocalF32)
 _FORWARD_UNOP(Neg)
-_FORWARD_UNOP(Sort)
+_FORWARD_UNOP(Sqrt)
+_FORWARD_UNOP(Rsqrt)
+_FORWARD_UNOP(Square)
+_FORWARD_UNOP(Reciprocal)
+_FORWARD_UNOP(Erfc)
+_FORWARD_UNOP(Erf)
+_FORWARD_UNOP(ErfInv)
+_FORWARD_UNOP(Lgamma)
+_FORWARD_UNOP(Digamma)
+_FORWARD_UNOP(Acos)
+_FORWARD_UNOP(Asin)
+_FORWARD_UNOP(Atan)
+_FORWARD_UNOP(Tan)
+_FORWARD_UNOP(Acosh)
+_FORWARD_UNOP(Asinh)
+_FORWARD_UNOP(Atanh)
+_FORWARD_UNOP(Cosh)
+_FORWARD_UNOP(Sinh)
+_FORWARD_UNOP(Real)
+_FORWARD_UNOP(Imag)
+_FORWARD_UNOP(Conj)
 
 #undef _FORWARD
 #undef _FORWARD_UNOP
@@ -659,8 +696,7 @@ StatusOr<LocalShapedBufferTuple*> DestructureLocalShapedBufferTuple(
         "Attemped to destructure a LocalShapedBuffer that did not have a tuple "
         "shape; shape: %s",
         ShapeUtil::HumanString(
-            local_shaped_buffer->shaped_buffer()->on_device_shape())
-            .c_str());
+            local_shaped_buffer->shaped_buffer()->on_device_shape()));
   }
 
   DeviceMemoryAllocator* allocator =

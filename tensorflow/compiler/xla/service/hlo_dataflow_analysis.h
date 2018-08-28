@@ -138,7 +138,8 @@ class HloDataflowAnalysis {
   // Returns true if 'user' cannot possibly use the buffer at 'index' in
   // 'operand'. Returns false otherwise.
   //
-  // REQUIRES: 'operand' is an operand of 'user'.
+  // 'operand' does not have to be an operand of 'user'. This can be the case
+  // with indirect uses.
   bool DoesNotUseOperandBuffer(const HloInstruction* operand,
                                const ShapeIndex& index,
                                const HloInstruction* user) const;
@@ -189,7 +190,7 @@ class HloDataflowAnalysis {
   bool UpdateGetTupleElementValueSet(HloInstruction* gte);
   bool UpdateParameterValueSet(HloInstruction* parameter);
   bool UpdateRecvDoneValueSet(HloInstruction* recv_done);
-  bool UpdateSelectValueSet(HloInstruction* select);
+  bool UpdateTupleSelectValueSet(HloInstruction* select);
   bool UpdateSendValueSet(HloInstruction* send);
   bool UpdateTupleValueSet(HloInstruction* tuple);
   bool UpdateWhileValueSet(HloInstruction* xla_while);
