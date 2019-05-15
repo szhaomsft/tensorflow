@@ -17,8 +17,12 @@
 
 set -e
 
+function is_absolute {
+  [[ "$1" = /* ]] || [[ "$1" =~ ^[a-zA-Z]:[/\\].* ]]
+}
+
 function real_path() {
-  [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
+  is_absolute "$1" && echo "$1" || echo "$PWD/${1#./}"
 }
 
 function cp_external() {
@@ -27,7 +31,7 @@ function cp_external() {
 
   pushd .
   cd "$src_dir"
-  for f in `find . ! -type d ! -name '*.py' ! -name '*local_config_cuda*' ! -name '*local_config_tensorrt*' ! -name '*org_tensorflow*'`; do
+  for f in `find . ! -type d ! -name '*.py' ! -path '*local_config_cuda*' ! -path '*local_config_tensorrt*' ! -path '*local_config_syslibs*' ! -path '*org_tensorflow*'`; do
     mkdir -p "${dest_dir}/$(dirname ${f})"
     cp "${f}" "${dest_dir}/$(dirname ${f})/"
   done
@@ -39,8 +43,7 @@ function cp_external() {
 
 PLATFORM="$(uname -s | tr 'A-Z' 'a-z')"
 function is_windows() {
-  # On windows, the shell script is actually running in msys
-  if [[ "${PLATFORM}" =~ msys_nt* ]]; then
+  if [[ "${PLATFORM}" =~ (cygwin|mingw32|mingw64|msys)_nt* ]]; then
     true
   else
     false
@@ -115,9 +118,6 @@ function prepare_src() {
         fi
       fi
     fi
-    mkdir "${TMPDIR}/tensorflow/aux-bin"
-    # Install toco as a binary in aux-bin.
-    cp bazel-bin/tensorflow/contrib/lite/python/tflite_convert ${TMPDIR}/tensorflow/aux-bin/
   fi
 
   # protobuf pip package doesn't ship with header files. Copy the headers
@@ -125,7 +125,7 @@ function prepare_src() {
   mkdir -p ${TMPDIR}/google
   mkdir -p ${TMPDIR}/third_party
   pushd ${RUNFILES%org_tensorflow} > /dev/null
-  for header in $(find protobuf_archive -name \*.h); do
+  for header in $(find protobuf_archive -name "*.h" -o -name "*.inc"); do
     mkdir -p "${TMPDIR}/google/$(dirname ${header})"
     cp "$header" "${TMPDIR}/google/$(dirname ${header})/"
   done
@@ -135,6 +135,9 @@ function prepare_src() {
   cp tensorflow/tools/pip_package/MANIFEST.in ${TMPDIR}
   cp tensorflow/tools/pip_package/README ${TMPDIR}
   cp tensorflow/tools/pip_package/setup.py ${TMPDIR}
+
+  rm -f ${TMPDIR}/tensorflow/libtensorflow_framework.so
+  rm -f ${TMPDIR}/tensorflow/libtensorflow_framework.so.[0-9].*
 }
 
 function build_wheel() {

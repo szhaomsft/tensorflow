@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/service/hlo_matchers.h"
+#include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/service/hlo_parser.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 
@@ -75,8 +76,10 @@ TEST(HloMatchersTest, Test) {
 }
 
 TEST(HloMatchersTest, CustomCallMatcher) {
-  auto c1 = HloInstruction::CreateConstant(Literal::CreateR1<float>({1, 2, 3}));
-  auto c2 = HloInstruction::CreateConstant(Literal::CreateR1<int32>({1, 2, 3}));
+  auto c1 =
+      HloInstruction::CreateConstant(LiteralUtil::CreateR1<float>({1, 2, 3}));
+  auto c2 =
+      HloInstruction::CreateConstant(LiteralUtil::CreateR1<int32>({1, 2, 3}));
   auto call = HloInstruction::CreateCustomCall(
       ShapeUtil::MakeShape(F32, {1}), {c1.get(), c2.get()}, "foo_target");
 
@@ -154,9 +157,8 @@ TEST(HloMatchersTest, ShardingMatcher) {
   Array<int64> assignment({2});
   assignment.SetValues({0, 1});
   auto sharding = HloSharding::Tuple(
-      tuple_shape,
-      {HloSharding::Tile(ShapeUtil::MakeShape(F32, {5}), assignment),
-       HloSharding::AssignDevice(1), HloSharding::Replicate()});
+      tuple_shape, {HloSharding::Tile(assignment), HloSharding::AssignDevice(1),
+                    HloSharding::Replicate()});
   p2->set_sharding(sharding);
 
   EXPECT_THAT(p0.get(), op::NoSharding());
@@ -169,8 +171,7 @@ TEST(HloMatchersTest, ShardingMatcher) {
 
   EXPECT_THAT(
       p2.get(),
-      op::Sharding(
-          "{{f32[5] devices=[2]0,1}, {maximal device=1}, {replicated}}"));
+      op::Sharding("{{devices=[2]0,1}, {maximal device=1}, {replicated}}"));
 
   EXPECT_THAT(Explain(p0.get(), op::Sharding(HloSharding::AssignDevice(1))),
               "%param.0 = f32[5]{0} parameter(0) has no sharding (expected: "
@@ -217,6 +218,34 @@ ENTRY DotOperationFusion_TransposeFusion {
       "%dot = f32[1,1024]{1,0} dot(f32[1,256]{1,0} %arg0, f32[256,1024]{1,0} "
       "%arg1), lhs_contracting_dims={1}, rhs_contracting_dims={0} has wrong "
       "rhs_contracting_dimensions (got {0} want {1})");
+}
+
+TEST(HloMatchersTest, ComparisonMatcher) {
+  auto shape = ShapeUtil::MakeShape(F32, {1});
+  auto p0 = HloInstruction::CreateParameter(0, shape, "param.0");
+  auto p1 = HloInstruction::CreateParameter(1, shape, "param.1");
+  auto eq = HloInstruction::CreateCompare(shape, p0.get(), p1.get(),
+                                          ComparisonDirection::kEq);
+  auto ne = HloInstruction::CreateCompare(shape, p0.get(), p1.get(),
+                                          ComparisonDirection::kNe);
+  auto add =
+      HloInstruction::CreateBinary(shape, HloOpcode::kAdd, p0.get(), p1.get());
+  auto le = HloInstruction::CreateCompare(shape, p0.get(), add.get(),
+                                          ComparisonDirection::kLe);
+
+  EXPECT_THAT(eq.get(), op::Compare());
+  EXPECT_THAT(eq.get(), op::Eq());
+  EXPECT_THAT(ne.get(), op::Compare());
+  EXPECT_THAT(ne.get(), op::Ne());
+  EXPECT_THAT(le.get(),
+              op::Compare(op::Parameter(0),
+                          op::Add(op::Parameter(0), op::Parameter(1))));
+  EXPECT_THAT(le.get(), op::Le(op::Parameter(0),
+                               op::Add(op::Parameter(0), op::Parameter(1))));
+
+  EXPECT_THAT(Explain(eq.get(), op::Add()), Eq(""));
+  EXPECT_THAT(Explain(eq.get(), op::Ne()),
+              Eq("has wrong comparison direction (got EQ, want NE)"));
 }
 
 }  // namespace

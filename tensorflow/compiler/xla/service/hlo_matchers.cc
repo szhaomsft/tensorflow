@@ -15,14 +15,12 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/hlo_matchers.h"
 
+#include "absl/strings/str_join.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/test.h"
-#include "tensorflow/core/lib/strings/str_util.h"
 
 namespace xla {
 namespace testing {
-
-using ::tensorflow::str_util::Join;
 
 bool HloMatcher::MatchAndExplain(
     const HloInstruction* instruction,
@@ -86,6 +84,22 @@ bool HloParameterMatcher::MatchAndExplain(
     *listener << "has wrong parameter number (got "
               << instruction->parameter_number() << ", want "
               << parameter_number_ << ")";
+    return false;
+  }
+  return true;
+}
+
+bool HloComparisonMatcher::MatchAndExplain(
+    const HloInstruction* instruction,
+    ::testing::MatchResultListener* listener) const {
+  if (!HloMatcher::MatchAndExplain(instruction, listener)) {
+    return false;
+  }
+  if (instruction->comparison_direction() != direction_) {
+    *listener << "has wrong comparison direction (got "
+              << ComparisonDirectionToString(
+                     instruction->comparison_direction())
+              << ", want " << ComparisonDirectionToString(direction_) << ")";
     return false;
   }
   return true;
@@ -210,8 +224,8 @@ bool HloDotWithContractingDimsMatcher::MatchAndExplain(
       dim_nums.lhs_contracting_dimensions(0) != lhs_contracting_dim_) {
     *listener << instruction->ToString()
               << " has wrong lhs_contracting_dimensions (got {"
-              << Join(dim_nums.lhs_contracting_dimensions(), ",") << "} want {"
-              << lhs_contracting_dim_ << "})";
+              << absl::StrJoin(dim_nums.lhs_contracting_dimensions(), ",")
+              << "} want {" << lhs_contracting_dim_ << "})";
     return false;
   }
 
@@ -219,8 +233,8 @@ bool HloDotWithContractingDimsMatcher::MatchAndExplain(
       dim_nums.rhs_contracting_dimensions(0) != rhs_contracting_dim_) {
     *listener << instruction->ToString()
               << " has wrong rhs_contracting_dimensions (got {"
-              << Join(dim_nums.rhs_contracting_dimensions(), ",") << "} want {"
-              << rhs_contracting_dim_ << "})";
+              << absl::StrJoin(dim_nums.rhs_contracting_dimensions(), ",")
+              << "} want {" << rhs_contracting_dim_ << "})";
     return false;
   }
 
@@ -237,10 +251,6 @@ void HloDotWithContractingDimsMatcher::DescribeTo(std::ostream* os) const {
 
 void PrintTo(const HloInstruction* inst, ::std::ostream* os) {
   *os << (inst ? inst->ToString() : "nullptr");
-}
-
-void PrintTo(HloInstruction* inst, ::std::ostream* os) {
-  PrintTo(const_cast<const HloInstruction*>(inst), os);
 }
 
 }  // namespace xla

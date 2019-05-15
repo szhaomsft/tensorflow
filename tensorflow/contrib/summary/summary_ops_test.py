@@ -20,9 +20,12 @@ import os
 import tempfile
 import time
 
+import sqlite3
+
 import numpy as np
 import six
 
+from tensorflow.contrib.summary import summary as summary_ops
 from tensorflow.contrib.summary import summary_test_util
 from tensorflow.core.framework import graph_pb2
 from tensorflow.core.framework import node_def_pb2
@@ -34,7 +37,6 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import state_ops
-from tensorflow.python.ops import summary_ops_v2 as summary_ops
 from tensorflow.python.platform import gfile
 from tensorflow.python.training import training_util
 
@@ -150,13 +152,34 @@ class EagerFileTest(test_util.TensorFlowTestCase):
       self.assertEqual(len(events), 2)
       self.assertEqual(events[1].summary.value[0].tag, 'scalar')
 
+  def testRecordEveryNGlobalSteps(self):
+    step = training_util.get_or_create_global_step()
+    logdir = tempfile.mkdtemp()
+
+    def run_step():
+      summary_ops.scalar('scalar', i, step=step)
+      step.assign_add(1)
+
+    with summary_ops.create_file_writer(
+        logdir).as_default(), summary_ops.record_summaries_every_n_global_steps(
+            2, step):
+      for i in range(10):
+        run_step()
+      # And another 10 steps as a graph function.
+      run_step_fn = function.defun(run_step)
+      for i in range(10):
+        run_step_fn()
+
+    events = summary_test_util.events_from_logdir(logdir)
+    self.assertEqual(len(events), 11)
+
   def testMaxQueue(self):
     logs = tempfile.mkdtemp()
     with summary_ops.create_file_writer(
         logs, max_queue=1, flush_millis=999999,
         name='lol').as_default(), summary_ops.always_record_summaries():
       get_total = lambda: len(summary_test_util.events_from_logdir(logs))
-      # Note: First tf.Event is always file_version.
+      # Note: First tf.compat.v1.Event is always file_version.
       self.assertEqual(1, get_total())
       summary_ops.scalar('scalar', 2.0, step=1)
       self.assertEqual(1, get_total())
@@ -170,7 +193,7 @@ class EagerFileTest(test_util.TensorFlowTestCase):
         logs, max_queue=999999, flush_millis=999999, name='lol')
     with writer.as_default(), summary_ops.always_record_summaries():
       get_total = lambda: len(summary_test_util.events_from_logdir(logs))
-      # Note: First tf.Event is always file_version.
+      # Note: First tf.compat.v1.Event is always file_version.
       self.assertEqual(1, get_total())
       summary_ops.scalar('scalar', 2.0, step=1)
       summary_ops.scalar('scalar', 2.0, step=2)
@@ -274,6 +297,19 @@ class EagerFileTest(test_util.TensorFlowTestCase):
 
 
 class EagerDbTest(summary_test_util.SummaryDbTest):
+
+  def testDbURIOpen(self):
+    tmpdb_path = os.path.join(self.get_temp_dir(), 'tmpDbURITest.sqlite')
+    tmpdb_uri = six.moves.urllib_parse.urljoin('file:', tmpdb_path)
+    tmpdb_writer = summary_ops.create_db_writer(tmpdb_uri, 'experimentA',
+                                                'run1', 'user1')
+    with summary_ops.always_record_summaries():
+      with tmpdb_writer.as_default():
+        summary_ops.scalar('t1', 2.0)
+    tmpdb = sqlite3.connect(tmpdb_path)
+    num = get_one(tmpdb, 'SELECT count(*) FROM Tags WHERE tag_name = "t1"')
+    self.assertEqual(num, 1)
+    tmpdb.close()
 
   def testIntegerSummaries(self):
     step = training_util.create_global_step()

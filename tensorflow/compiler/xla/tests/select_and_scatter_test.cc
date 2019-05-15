@@ -22,10 +22,10 @@ limitations under the License.
 #include "tensorflow/compiler/xla/client/lib/arithmetic.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
 #include "tensorflow/compiler/xla/client/padding.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_computation.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/compiler/xla/layout_util.h"
-#include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/reference_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/tests/client_library_test_base.h"
@@ -42,8 +42,8 @@ struct SelectAndScatterTestParam {
   std::vector<int64> operand_shape;
   std::vector<int64> source_shape;
   Padding padding_type;
-  tensorflow::gtl::ArraySlice<int64> window_dimensions;
-  tensorflow::gtl::ArraySlice<int64> window_strides;
+  absl::Span<const int64> window_dimensions;
+  absl::Span<const int64> window_strides;
 };
 
 class SelectAndScatterTest
@@ -84,7 +84,7 @@ XLA_TEST_P(SelectAndScatterTest, ParamTest) {
                    GetParam().window_strides, GetParam().padding_type, source,
                    ConstantR0<float>(&builder_, 0.0f), add_f32_);
 
-  ComputeAndCompare(&builder_, {}, ErrorSpec(1e-5));
+  ComputeAndCompare(&builder_, {}, ErrorSpec(1e-4));
 }
 
 INSTANTIATE_TEST_CASE_P(
@@ -146,6 +146,12 @@ INSTANTIATE_TEST_CASE_P(
                                   Padding::kValid,
                                   {3, 3, 1, 1},
                                   {3, 3, 1, 1}},
+        // Uncovered by b/126212776.
+        SelectAndScatterTestParam{{15, 1, 1, 1},
+                                  {2, 1, 1, 1},
+                                  Padding::kValid,
+                                  {14, 1, 1, 1},
+                                  {1, 1, 1, 1}},
         SelectAndScatterTestParam{{7, 3, 4, 4},
                                   {3, 1, 4, 4},
                                   Padding::kValid,
@@ -193,7 +199,10 @@ INSTANTIATE_TEST_CASE_P(
         SelectAndScatterTestParam{
             {1, 5, 5}, {1, 5, 5}, Padding::kSame, {3, 1, 1}, {3, 1, 1}},
         SelectAndScatterTestParam{
-            {7, 8, 256}, {4, 8, 256}, Padding::kSame, {2, 1, 1}, {2, 1, 1}}));
+            {7, 8, 256}, {4, 8, 256}, Padding::kSame, {2, 1, 1}, {2, 1, 1}},
+        SelectAndScatterTestParam{{1104}, {551}, Padding::kValid, {3}, {2}},
+        SelectAndScatterTestParam{
+            {1300}, {1171}, Padding::kValid, {130}, {1}}));
 
 // Test for F32 1D array, with a zero-element input.
 XLA_TEST_F(SelectAndScatterTest, R1S0F32) {

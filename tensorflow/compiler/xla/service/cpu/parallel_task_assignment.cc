@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/cpu/parallel_task_assignment.h"
 
+#include "absl/memory/memory.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/service/cpu/dot_op_emitter.h"
 #include "tensorflow/compiler/xla/service/cpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/cpu/shape_partition.h"
@@ -109,7 +111,7 @@ ParallelTaskAssignment::ParallelTaskAssignment(
     : target_machine_features_(*target_machine_features) {
   VLOG(1) << "ParallelTaskAssignment max_parallelism: " << max_parallelism;
   // Run cost analysis on 'module'.
-  auto cost_analysis = MakeUnique<HloCostAnalysis>(shape_size);
+  auto cost_analysis = absl::make_unique<HloCostAnalysis>(shape_size);
   HloComputation* computation = module->entry_computation();
   Status status = computation->root_instruction()->Accept(cost_analysis.get());
   if (status.ok()) {
@@ -140,14 +142,12 @@ int64 ParallelTaskAssignment::GetTargetParallelTaskCount(
       opcode == HloOpcode::kGetTupleElement || opcode == HloOpcode::kBitcast ||
       opcode == HloOpcode::kFft || opcode == HloOpcode::kInfeed ||
       opcode == HloOpcode::kOutfeed || opcode == HloOpcode::kRng ||
+      opcode == HloOpcode::kSort ||
       (opcode == HloOpcode::kConvolution &&
        PotentiallyImplementedAsEigenConvolution(*instruction,
                                                 target_machine_features_)) ||
-      PotentiallyImplementedAsEigenDot(*instruction,
-                                       target_machine_features_) ||
-      (opcode == HloOpcode::kFusion &&
-       instruction->fusion_kind() != HloInstruction::FusionKind::kLoop) ||
-      ShapeUtil::IsTuple(instruction->shape())) {
+      (opcode == HloOpcode::kFusion && !instruction->IsLoopFusion()) ||
+      instruction->shape().IsTuple()) {
     return 1;
   }
 
@@ -216,8 +216,7 @@ bool ParallelTaskAssigner::AssignParallelTasksHelper(
 
     // Outline 'instruction' in 'computation' for parallel task assignment.
     auto* call = module->OutlineExpressionFromComputation(
-        {instruction},
-        tensorflow::strings::StrCat("parallel_", instruction->name()),
+        {instruction}, absl::StrCat("parallel_", instruction->name()),
         computation);
 
     // Set assigned dimension partitioning to 'instruction'.
@@ -239,10 +238,7 @@ void ParallelTaskAssigner::ComputeTargetParallelTasks(
                                                   &target_machine_features_);
 
   // Compute parallel task counts for all instructions in 'module'.
-  for (auto* computation : module->computations()) {
-    if (computation->IsFusionComputation()) {
-      continue;
-    }
+  for (auto* computation : module->MakeNonfusionComputations()) {
     for (auto* instruction : computation->instructions()) {
       // Query ParallelTaskAssignment for target parallel task count.
       const int64 target_parallel_task_count =

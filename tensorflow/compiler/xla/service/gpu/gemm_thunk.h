@@ -19,6 +19,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/gpu/buffer_allocations.h"
 #include "tensorflow/compiler/xla/service/gpu/gpu_executable.h"
+#include "tensorflow/compiler/xla/service/gpu/hlo_execution_profiler.h"
 #include "tensorflow/compiler/xla/service/gpu/thunk.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
@@ -40,23 +41,17 @@ class GemmThunk : public Thunk {
             const BufferAllocation::Slice& rhs_buffer,
             const BufferAllocation::Slice& output_buffer,
             const Shape& lhs_shape, const Shape& rhs_shape,
-            const Shape& output_shape, double alpha,
-            const HloInstruction* hlo_instruction);
+            const Shape& output_shape, double alpha, double beta,
+            const HloInstruction* hlo_instruction,
+            bool implements_whole_instruction);
 
   GemmThunk(const GemmThunk&) = delete;
   GemmThunk& operator=(const GemmThunk&) = delete;
 
   // Does the gemm operation for the thunk on "stream", which must be non-null.
   Status ExecuteOnStream(const BufferAllocations& buffer_allocations,
-                         se::Stream* stream) override;
-
-  // Returns true if we'll perform autotuning if run on the given stream.  If
-  // so, we want the GPU to be quiescent during autotuning, so as not to
-  // introduce noise in our results.
-  bool ShouldHaltAllActivityBeforeRunning(se::Stream* stream) override {
-    return autotune_results_.count(
-               stream->parent()->GetDeviceDescription().name()) != 0;
-  }
+                         se::Stream* stream,
+                         HloExecutionProfiler* profiler) override;
 
  private:
   const BufferAllocation::Slice lhs_buffer_;
@@ -68,13 +63,9 @@ class GemmThunk : public Thunk {
   const Shape output_shape_;
 
   const double alpha_;
+  const double beta_;
 
-  // Maps device names (StreamExecutor::DeviceDescription::name()) to autotune
-  // results.  The map's value is the best algorithm we've found for this thunk
-  // on this device, or an error if none of the algorithms worked and we should
-  // use the regular gemm without an algorithm.
-  std::unordered_map<string, StatusOr<se::blas::AlgorithmType>>
-      autotune_results_;
+  const bool implements_whole_instruction_;
 };
 
 }  // namespace gpu

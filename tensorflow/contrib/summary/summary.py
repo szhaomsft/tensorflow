@@ -17,7 +17,7 @@
 The operations in this package are safe to use with eager execution turned on or
 off. It has a more flexible API that allows summaries to be written directly
 from ops to places other than event log files, rather than propagating protos
-from @{tf.summary.merge_all} to @{tf.summary.FileWriter}.
+from `tf.summary.merge_all` to `tf.summary.FileWriter`.
 
 To use with eager execution enabled, write your code as follows:
 
@@ -64,7 +64,7 @@ from __future__ import division
 from __future__ import print_function
 
 # pylint: disable=unused-import
-from tensorflow.python.ops.summary_ops_v2 import all_summary_ops
+from tensorflow.python.ops.summary_ops_v2 import all_v2_summary_ops as all_summary_ops
 from tensorflow.python.ops.summary_ops_v2 import always_record_summaries
 from tensorflow.python.ops.summary_ops_v2 import audio
 from tensorflow.python.ops.summary_ops_v2 import create_db_writer

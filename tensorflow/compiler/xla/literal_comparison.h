@@ -20,7 +20,7 @@ limitations under the License.
 #define TENSORFLOW_COMPILER_XLA_LITERAL_COMPARISON_H_
 
 #include "tensorflow/compiler/xla/error_spec.h"
-#include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/core/lib/core/status.h"
 
 namespace xla {
@@ -55,9 +55,10 @@ using MiscompareCallback =
 // being compared.
 //
 // If detailed_message is true, then the error message in the assertion result
-// will contain a more detailed breakdown of mismatches.
+// will contain a more detailed breakdown of mismatches.  By default, we display
+// a detailed message only for "large" inputs.
 Status Near(const LiteralSlice& expected, const LiteralSlice& actual,
-            const ErrorSpec& error, bool detailed_message,
+            const ErrorSpec& error, absl::optional<bool> detailed_message,
             const MiscompareCallback& miscompare_callback);
 
 // Calling ToString on a literal with over 100 million elements takes around

@@ -20,6 +20,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/logical_buffer.h"
 #include "tensorflow/compiler/xla/shape_util.h"
@@ -28,8 +30,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace xla {
@@ -75,27 +75,25 @@ Status BufferLiveness::Analyze() {
 
 string BufferLiveness::ToString() const {
   std::vector<string> pieces;
-  pieces.push_back(tensorflow::strings::Printf("BufferLiveness(module=%s):",
-                                               module_->name().c_str()));
+  pieces.push_back(
+      absl::StrFormat("BufferLiveness(module=%s):", module_->name()));
   pieces.push_back("HloOrdering:");
   pieces.push_back(hlo_ordering_->ToString());
-  pieces.push_back(tensorflow::strings::Printf("Aliased buffers:"));
+  pieces.push_back("Aliased buffers:");
   for (const LogicalBuffer* buffer : aliased_buffers_) {
-    pieces.push_back(
-        tensorflow::strings::Printf("  %s", buffer->ToString().c_str()));
+    pieces.push_back(absl::StrFormat("  %s", buffer->ToString()));
   }
-  pieces.push_back(tensorflow::strings::Printf("Live out buffers:"));
+  pieces.push_back("Live out buffers:");
   for (const LogicalBuffer* buffer : maybe_live_out_buffers_) {
-    pieces.push_back(
-        tensorflow::strings::Printf("  %s", buffer->ToString().c_str()));
+    pieces.push_back(absl::StrFormat("  %s", buffer->ToString()));
   }
-  return tensorflow::str_util::Join(pieces, "\n");
+  return absl::StrJoin(pieces, "\n");
 }
 
 bool BufferLiveness::live_range_strictly_before(const LogicalBuffer& a,
                                                 const LogicalBuffer& b) const {
-  TF_CHECK_OK(points_to_analysis_->VerifyBuffer(a));
-  TF_CHECK_OK(points_to_analysis_->VerifyBuffer(b));
+  TF_DCHECK_OK(points_to_analysis_->VerifyBuffer(a));
+  TF_DCHECK_OK(points_to_analysis_->VerifyBuffer(b));
 
   if (!hlo_ordering_->ExecutesBefore(a.instruction(), b.instruction())) {
     return false;
@@ -116,12 +114,13 @@ bool BufferLiveness::live_range_strictly_before(const LogicalBuffer& a,
 
     // If the root instruction aliases the buffer 'a', the live range of 'a' is
     // until the end of the computation and can never be strictly before another
-    // buffer defined in the same computation. This is needed to prevent the
-    // root instruction's buffers from being reused by later instructions even
-    // when the root is not the last instruction in the schedule.
+    // buffer nested in the same computation. This is needed to prevent the root
+    // instruction's buffers from being reused by later instructions even when
+    // the root is not the last instruction in the schedule.
     if (alias.instruction()->parent()->root_instruction() ==
             alias.instruction() &&
-        alias.instruction()->parent() == b.instruction()->parent()) {
+        hlo_ordering_->call_graph().InstructionIsNestedIn(
+            b.instruction(), alias.instruction()->parent())) {
       return false;
     }
   }
@@ -149,15 +148,20 @@ bool IsEntryParameter(const HloInstruction* instruction) {
 
 bool BufferLiveness::MayInterfere(const LogicalBuffer& a,
                                   const LogicalBuffer& b) const {
-  // Entry parameters live at the entry of the execution, thus always interfere
-  // with all other instructions executing before them in the ordering.
+  // Parameters live at the entry of the computation, thus always interfere with
+  // all other instructions inside the computation executing before them in the
+  // ordering.
   const HloInstruction* a_instruction = a.instruction();
   const HloInstruction* b_instruction = b.instruction();
-  if (IsEntryParameter(a_instruction) &&
+  if (a_instruction->opcode() == HloOpcode::kParameter &&
+      hlo_ordering_->call_graph().InstructionIsNestedIn(
+          b_instruction, a_instruction->parent()) &&
       hlo_ordering_->ExecutesBefore(b_instruction, a_instruction)) {
     return true;
   }
-  if (IsEntryParameter(b_instruction) &&
+  if (b_instruction->opcode() == HloOpcode::kParameter &&
+      hlo_ordering_->call_graph().InstructionIsNestedIn(
+          a_instruction, b_instruction->parent()) &&
       hlo_ordering_->ExecutesBefore(a_instruction, b_instruction)) {
     return true;
   }

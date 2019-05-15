@@ -58,8 +58,18 @@ class StringDest : public WritableFile {
   Status Close() override { return Status::OK(); }
   Status Flush() override { return Status::OK(); }
   Status Sync() override { return Status::OK(); }
-  Status Append(const StringPiece& slice) override {
+  Status Append(StringPiece slice) override {
     contents_->append(slice.data(), slice.size());
+    return Status::OK();
+  }
+#if defined(PLATFORM_GOOGLE)
+  Status Append(const absl::Cord& data) override {
+    contents_->append(data.ToString());
+    return Status::OK();
+  }
+#endif
+  Status Tell(int64* pos) override {
+    *pos = contents_->size();
     return Status::OK();
   }
 
@@ -126,6 +136,13 @@ class RecordioTest : public ::testing::Test {
     TF_ASSERT_OK(writer_->WriteRecord(StringPiece(msg)));
   }
 
+#if defined(PLATFORM_GOOGLE)
+  void Write(const absl::Cord& msg) {
+    ASSERT_TRUE(!reading_) << "Write() after starting to read";
+    TF_ASSERT_OK(writer_->WriteRecord(msg));
+  }
+#endif
+
   size_t WrittenBytes() const { return contents_.size(); }
 
   string Read() {
@@ -186,6 +203,21 @@ TEST_F(RecordioTest, ReadWrite) {
   ASSERT_EQ("EOF", Read());
   ASSERT_EQ("EOF", Read());  // Make sure reads at eof work
 }
+
+#if defined(PLATFORM_GOOGLE)
+TEST_F(RecordioTest, ReadWriteCords) {
+  Write(absl::Cord("foo"));
+  Write(absl::Cord("bar"));
+  Write(absl::Cord(""));
+  Write(absl::Cord("xxxx"));
+  ASSERT_EQ("foo", Read());
+  ASSERT_EQ("bar", Read());
+  ASSERT_EQ("", Read());
+  ASSERT_EQ("xxxx", Read());
+  ASSERT_EQ("EOF", Read());
+  ASSERT_EQ("EOF", Read());  // Make sure reads at eof work
+}
+#endif
 
 TEST_F(RecordioTest, ManyRecords) {
   for (int i = 0; i < 100000; i++) {

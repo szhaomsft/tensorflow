@@ -14,8 +14,6 @@
 # ==============================================================================
 """RNN Cells and additional RNN operations.
 
-See @{$python/contrib.rnn} guide.
-
 <!--From core-->
 @@RNNCell
 @@LayerRNNCell
@@ -59,6 +57,9 @@ See @{$python/contrib.rnn} guide.
 @@HighwayWrapper
 @@GLSTMCell
 @@SRUCell
+@@IndRNNCell
+@@IndyGRUCell
+@@IndyLSTMCell
 
 <!--RNNCell wrappers-->
 @@AttentionCellWrapper

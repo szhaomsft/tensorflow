@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -258,7 +259,7 @@ class RollOp : public OpKernel {
       if (axis < 0) {
         axis += num_dims;
       }
-      OP_REQUIRES(context, 0 <= axis && axis < num_dims,
+      OP_REQUIRES(context, FastBoundsCheck(axis, num_dims),
                   errors::InvalidArgument("axis ", axis, " is out of range"));
       const int ds = std::max<int>(static_cast<int>(input.dim_size(axis)), 1);
       const int sum = shift_mod_sum[axis] + static_cast<int>(shift_flat(i));

@@ -44,7 +44,7 @@ layers = tf.keras.layers
 class RNN(tf.keras.Model):
   """A static RNN.
 
-  Similar to tf.nn.static_rnn, implemented as a class.
+  Similar to tf.compat.v1.nn.static_rnn, implemented as a class.
   """
 
   def __init__(self, hidden_dim, num_layers, keep_ratio):
@@ -128,7 +128,7 @@ class PTBModel(tf.keras.Model):
 
     self.linear = layers.Dense(
         vocab_size, kernel_initializer=tf.random_uniform_initializer(-0.1, 0.1))
-    self._output_shape = [-1, embedding_dim]
+    self._output_shape = [-1, hidden_dim]
 
   def call(self, input_seq, training):
     """Run the forward pass of PTBModel.
@@ -310,12 +310,12 @@ def main(_):
   with tf.device("/device:GPU:0" if have_gpu else None):
     # Make learning_rate a Variable so it can be included in the checkpoint
     # and we can resume training with the last saved learning_rate.
-    learning_rate = tfe.Variable(20.0, name="learning_rate")
+    learning_rate = tf.Variable(20.0, name="learning_rate")
     model = PTBModel(corpus.vocab_size(), FLAGS.embedding_dim,
                      FLAGS.hidden_dim, FLAGS.num_layers, FLAGS.dropout,
                      use_cudnn_rnn)
     optimizer = tf.train.GradientDescentOptimizer(learning_rate)
-    checkpoint = tfe.Checkpoint(
+    checkpoint = tf.train.Checkpoint(
         learning_rate=learning_rate, model=model,
         # GradientDescentOptimizer has no state to checkpoint, but noting it
         # here lets us swap in an optimizer that does.

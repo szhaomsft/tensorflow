@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "tensorflow/contrib/bigtable/kernels/test_kernels/bigtable_test_client.h"
 
-#include "google/bigtable/v2/data.pb.h"
+#include "external/com_github_googleapis_googleapis/google/bigtable/v2/data.pb.h"
 #include "google/protobuf/wrappers.pb.h"
 #include "re2/re2.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
@@ -28,6 +28,8 @@ namespace {
 void UpdateRow(const ::google::bigtable::v2::Mutation& mut,
                std::map<string, string>* row) {
   if (mut.has_set_cell()) {
+    CHECK(mut.set_cell().timestamp_micros() >= -1)
+        << "Timestamp_micros: " << mut.set_cell().timestamp_micros();
     auto col =
         strings::Printf("%s:%s", mut.set_cell().family_name().c_str(),
                         string(mut.set_cell().column_qualifier()).c_str());
@@ -61,24 +63,29 @@ class SampleRowKeysResponse : public grpc::ClientReaderInterface<
 
   bool NextMessageSize(uint32_t* sz) override {
     mutex_lock l(mu_);
-    if (sent_first_message_) {
-      return false;
+    mutex_lock l2(client_->mu_);
+    if (num_messages_sent_ * 2 < client_->table_.rows.size()) {
+      *sz = 10000;  // A sufficiently high enough value to not worry about.
+      return true;
     }
-    *sz = 10000;  // A sufficiently high enough value to not worry about.
-    return true;
+    return false;
   }
 
   bool Read(google::bigtable::v2::SampleRowKeysResponse* resp) override {
+    // Send every other key from the table.
     mutex_lock l(mu_);
-    if (sent_first_message_) {
-      return false;
-    }
-    sent_first_message_ = true;
-
     mutex_lock l2(client_->mu_);
     *resp = google::bigtable::v2::SampleRowKeysResponse();
-    resp->set_row_key(client_->table_.rows.begin()->first);
-    resp->set_offset_bytes(0);
+    auto itr = client_->table_.rows.begin();
+    for (uint64 i = 0; i < 2 * num_messages_sent_; ++i) {
+      ++itr;
+      if (itr == client_->table_.rows.end()) {
+        return false;
+      }
+    }
+    resp->set_row_key(itr->first);
+    resp->set_offset_bytes(100 * num_messages_sent_);
+    num_messages_sent_++;
     return true;
   }
 
@@ -88,7 +95,7 @@ class SampleRowKeysResponse : public grpc::ClientReaderInterface<
 
  private:
   mutex mu_;
-  bool sent_first_message_ GUARDED_BY(mu_) = false;
+  int64 num_messages_sent_ GUARDED_BY(mu_) = 0;
   BigtableTestClient* client_;  // Not owned.
 };
 
@@ -328,6 +335,17 @@ grpc::Status BigtableTestClient::ReadModifyWriteRow(
   return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
                       "ReadModifyWriteRow not implemented.");
 }
+std::unique_ptr<grpc::ClientAsyncResponseReaderInterface<
+    google::bigtable::v2::ReadModifyWriteRowResponse>>
+BigtableTestClient::AsyncReadModifyWriteRow(
+    grpc::ClientContext* context,
+    google::bigtable::v2::ReadModifyWriteRowRequest const& request,
+    grpc::CompletionQueue* cq) {
+  LOG(WARNING) << "Call to AsyncReadModifyWriteRow:" << __func__
+               << "(); this will likely cause a crash!";
+  return nullptr;
+}
+
 std::unique_ptr<
     grpc::ClientReaderInterface<google::bigtable::v2::ReadRowsResponse>>
 BigtableTestClient::ReadRows(
@@ -357,6 +375,72 @@ BigtableTestClient::MutateRows(
     }
   }
   return MakeUnique<MutateRowsResponse>(request.entries_size());
+}
+
+std::unique_ptr<grpc::ClientAsyncResponseReaderInterface<
+    google::bigtable::v2::MutateRowResponse>>
+BigtableTestClient::AsyncMutateRow(
+    grpc::ClientContext* context,
+    google::bigtable::v2::MutateRowRequest const& request,
+    grpc::CompletionQueue* cq) {
+  LOG(WARNING) << "Call to InMemoryDataClient::" << __func__
+               << "(); this will likely cause a crash!";
+  return nullptr;
+}
+
+std::unique_ptr<::grpc::ClientAsyncReaderInterface<
+    ::google::bigtable::v2::SampleRowKeysResponse>>
+BigtableTestClient::AsyncSampleRowKeys(
+    ::grpc::ClientContext* context,
+    const ::google::bigtable::v2::SampleRowKeysRequest& request,
+    ::grpc::CompletionQueue* cq, void* tag) {
+  LOG(WARNING) << "Call to InMemoryDataClient::" << __func__
+               << "(); this will likely cause a crash!";
+  return nullptr;
+}
+
+std::unique_ptr<::grpc::ClientAsyncReaderInterface<
+    ::google::bigtable::v2::MutateRowsResponse>>
+BigtableTestClient::AsyncMutateRows(
+    ::grpc::ClientContext* context,
+    const ::google::bigtable::v2::MutateRowsRequest& request,
+    ::grpc::CompletionQueue* cq, void* tag) {
+  LOG(WARNING) << "Call to InMemoryDataClient::" << __func__
+               << "(); this will likely cause a crash!";
+  return nullptr;
+}
+
+std::unique_ptr<grpc::ClientAsyncResponseReaderInterface<
+    google::bigtable::v2::CheckAndMutateRowResponse>>
+BigtableTestClient::AsyncCheckAndMutateRow(
+    grpc::ClientContext* context,
+    const google::bigtable::v2::CheckAndMutateRowRequest& request,
+    grpc::CompletionQueue* cq) {
+  LOG(WARNING) << "Call to InMemoryDataClient::" << __func__
+               << "(); this will likely cause a crash!";
+  return nullptr;
+}
+
+std::unique_ptr<
+    grpc::ClientAsyncReaderInterface<google::bigtable::v2::ReadRowsResponse>>
+BigtableTestClient::AsyncReadRows(
+    grpc::ClientContext* context,
+    const google::bigtable::v2::ReadRowsRequest& request,
+    grpc::CompletionQueue* cq, void* tag) {
+  LOG(WARNING) << "Call to InMemoryDataClient::" << __func__
+               << "(); this will likely cause a crash!";
+  return nullptr;
+}
+
+std::unique_ptr<
+    grpc::ClientAsyncReaderInterface<google::bigtable::v2::MutateRowsResponse>>
+BigtableTestClient::PrepareAsyncMutateRows(
+    grpc::ClientContext* context,
+    const google::bigtable::v2::MutateRowsRequest& request,
+    grpc::CompletionQueue* cq) {
+  LOG(WARNING) << "Call to InMemoryDataClient::" << __func__
+               << "(); this will likely cause a crash!";
+  return nullptr;
 }
 
 std::shared_ptr<grpc::Channel> BigtableTestClient::Channel() {

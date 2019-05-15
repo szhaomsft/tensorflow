@@ -39,6 +39,7 @@ class EagerClient {
   CLIENT_METHOD(KeepAlive);
   CLIENT_METHOD(CloseContext);
   CLIENT_METHOD(RegisterFunction);
+  CLIENT_METHOD(SendTensor);
 
 #undef CLIENT_METHOD
 };
@@ -47,7 +48,7 @@ class EagerClient {
 class EagerClientCache {
  public:
   virtual ~EagerClientCache() {}
-  virtual EagerClient* GetClient(const string& target) = 0;
+  virtual Status GetClient(const string& target, EagerClient** client) = 0;
 };
 
 }  // namespace eager

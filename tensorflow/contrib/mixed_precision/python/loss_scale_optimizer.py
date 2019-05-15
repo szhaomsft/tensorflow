@@ -66,10 +66,11 @@ class LossScaleOptimizer(optimizer.Optimizer):
 
   # Choose a loss scale manager which decides how to pick the right loss scale
   # throughout the training process.
-  loss_scale_manger = tf.contrib.mixed_precision.FixedLossScaleManager(5000)
+  loss_scale_manager = tf.contrib.mixed_precision.FixedLossScaleManager(5000)
 
   # Wraps the original optimizer in a LossScaleOptimizer.
-  loss_scale_optimizer = LossScaleOptimizer(opt, loss_scale_manager)
+  loss_scale_optimizer =
+      tf.contrib.mixed_precision.LossScaleOptimizer(opt, loss_scale_manager)
 
   # Call minimize() on the loss scale optimizer.
   train_op = loss_scale_optimizer.minimize(loss)
@@ -77,7 +78,7 @@ class LossScaleOptimizer(optimizer.Optimizer):
 
   If gradients clipping is applied, one can call
   `optimizer.compute_gradients()` and `optimizer.apply_gradients()`
-  seperately.
+  separately.
 
   Notice the following way of using LossScaleOptimizer is not intended. Always
   use `loss_scale_optimizer.compute_gradients()` to compute gradients instead of
@@ -103,8 +104,8 @@ class LossScaleOptimizer(optimizer.Optimizer):
 
     Args:
       opt: The actual optimizer that will be used to compute and apply the
-        gradients. Must be an implementation of the @{tf.train.Optimizer}
-        interface.
+        gradients. Must be an implementation of the
+        `tf.compat.v1.train.Optimizer` interface.
       loss_scale_manager: A LossScaleManager object.
     """
     self._opt = opt
@@ -117,7 +118,7 @@ class LossScaleOptimizer(optimizer.Optimizer):
                         aggregation_method=None,
                         colocate_gradients_with_ops=False,
                         grad_loss=None):
-    """Compute gradients. See base class @{tf.train.Optimizer}."""
+    """Compute gradients. See base class `tf.compat.v1.train.Optimizer`."""
     loss_scale = self._loss_scale_manager.get_loss_scale()
     if context.executing_eagerly():
 
@@ -141,7 +142,7 @@ class LossScaleOptimizer(optimizer.Optimizer):
     return self._down_scale(grads_and_vars, loss_scale)
 
   def apply_gradients(self, grads_and_vars, global_step=None, name=None):
-    """Apply gradients. See base class @{tf.train.Optimizer}."""
+    """Apply gradients. See base class `tf.compat.v1.train.Optimizer`."""
     grads = [g for (g, _) in grads_and_vars]
 
     is_finite_grad = []
@@ -153,8 +154,9 @@ class LossScaleOptimizer(optimizer.Optimizer):
     def true_apply_gradients_fn():
       return self._opt.apply_gradients(grads_and_vars, global_step, name)
 
-    update_vars = control_flow_ops.cond(
-        is_overall_finite, true_apply_gradients_fn, gen_control_flow_ops.no_op)
+    update_vars = control_flow_ops.cond(is_overall_finite,
+                                        true_apply_gradients_fn,
+                                        gen_control_flow_ops.no_op)
     # Potentially adjust gradient scale in case of finite gradients.
     return control_flow_ops.group(
         update_vars,

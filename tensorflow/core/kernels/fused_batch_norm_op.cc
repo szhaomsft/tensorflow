@@ -18,7 +18,6 @@ limitations under the License.
 #if GOOGLE_CUDA
 #define EIGEN_USE_GPU
 #include "tensorflow/core/kernels/conv_2d.h"
-#include "tensorflow/core/kernels/conv_ops_gpu.h"
 #include "tensorflow/core/util/stream_executor_util.h"
 #endif
 
@@ -44,6 +43,24 @@ struct FusedBatchNorm;
 // is_training=True.
 template <typename Device, typename T, typename U>
 struct FusedBatchNormGrad;
+
+template <bool IsSame, typename Y, typename X, typename T>
+struct CastIfNecessary {
+  static inline void process(
+      Y& y, X& x_shifted, const Eigen::DSizes<Eigen::Index, 2>& rest_by_depth,
+      const CPUDevice& d) {
+    y.reshape(rest_by_depth).device(d) = x_shifted.template cast<T>();
+  }
+};
+
+template <typename Y, typename X, typename T>
+struct CastIfNecessary<true, Y, X, T> {
+  static inline void process(
+      Y& y, X& x_shifted, const Eigen::DSizes<Eigen::Index, 2>& rest_by_depth,
+      const CPUDevice& d) {
+    y.reshape(rest_by_depth).device(d) = x_shifted;
+  }
+};
 
 template <typename T, typename U>
 struct FusedBatchNorm<CPUDevice, T, U> {
@@ -125,7 +142,11 @@ struct FusedBatchNorm<CPUDevice, T, U> {
     auto x_shifted =
         x_scaled + offset.reshape(one_by_depth).broadcast(bcast_spec);
 
-    y.reshape(rest_by_depth).device(d) = x_shifted.template cast<T>();
+    // Explicitly checks the types of T and U and only casts x_shifted when
+    // T != U. (Not doing so caused a 35-50% performance slowdown for
+    // some compiler flags.)
+    CastIfNecessary<std::is_same<T, U>::value, decltype(y), decltype(x_shifted),
+                    T>::process(y, x_shifted, rest_by_depth, d);
   }
 };
 
@@ -226,19 +247,28 @@ struct FusedBatchNorm<GPUDevice, T, U> {
                   Tensor* saved_inv_var, TensorFormat tensor_format,
                   bool is_training) {
     auto* stream = context->op_device_context()->stream();
-    OP_REQUIRES(context, stream, errors::Internal("No GPU stream avalible"));
+    OP_REQUIRES(context, stream, errors::Internal("No GPU stream available"));
 
     const int64 batch_size = GetTensorDim(x, tensor_format, 'N');
     const int64 channels = GetTensorDim(x, tensor_format, 'C');
     const int64 height = GetTensorDim(x, tensor_format, 'H');
     const int64 width = GetTensorDim(x, tensor_format, 'W');
+
+    // If input tensor is in NHWC format, and we are running in inference mode,
+    // there is no need to convert to NCHW format, performance is the same.
+    // However in training mode, performance in NCHW format is much better.
+    TensorFormat compute_format = !is_training && tensor_format == FORMAT_NHWC
+                                      ? FORMAT_NHWC
+                                      : FORMAT_NCHW;
+
     VLOG(2) << "FusedBatchNorm:"
             << " batch_size: " << batch_size << " channels: " << channels
             << " height: " << height << " width:" << width
             << " x shape: " << x.shape().DebugString()
             << " scale shape: " << scale.shape().DebugString()
             << " offset shape: " << offset.shape().DebugString()
-            << " tensor format: " << tensor_format;
+            << " tensor format: " << ToString(tensor_format)
+            << " compute format: " << ToString(compute_format);
 
     // If input is empty, return NaN mean/variance
     if (x.shape().num_elements() == 0) {
@@ -253,12 +283,12 @@ struct FusedBatchNorm<GPUDevice, T, U> {
     Tensor y_transformed;
     se::DeviceMemory<T> y_ptr;
 
-    if (tensor_format == FORMAT_NCHW) {
+    if (tensor_format == compute_format) {
       y_ptr = StreamExecutorUtil::AsDeviceMemory<T>(*y);
-    } else if (tensor_format == FORMAT_NHWC) {
+    } else if (tensor_format == FORMAT_NHWC && compute_format == FORMAT_NCHW) {
       OP_REQUIRES_OK(context, context->allocate_temp(
                                   DataTypeToEnum<T>::value,
-                                  ShapeFromFormat(FORMAT_NCHW, batch_size,
+                                  ShapeFromFormat(compute_format, batch_size,
                                                   height, width, channels),
                                   &x_transformed));
       functor::NHWCToNCHW<GPUDevice, T, 4>()(
@@ -269,22 +299,27 @@ struct FusedBatchNorm<GPUDevice, T, U> {
 
       OP_REQUIRES_OK(context, context->allocate_temp(
                                   DataTypeToEnum<T>::value,
-                                  ShapeFromFormat(FORMAT_NCHW, batch_size,
+                                  ShapeFromFormat(compute_format, batch_size,
                                                   height, width, channels),
                                   &y_transformed));
       y_ptr = StreamExecutorUtil::AsDeviceMemory<T>(y_transformed);
     } else {
-      context->SetStatus(
-          errors::Internal("Unsupported tensor format: ", tensor_format));
+      context->SetStatus(errors::Internal(
+          "Unsupported tensor format: ", ToString(tensor_format),
+          " and compute format: ", ToString(compute_format)));
       return;
     }
+
+    const se::dnn::DataLayout data_layout =
+        compute_format == FORMAT_NHWC ? se::dnn::DataLayout::kBatchYXDepth
+                                      : se::dnn::DataLayout::kBatchDepthYX;
 
     se::dnn::BatchDescriptor x_desc;
     x_desc.set_count(batch_size)
         .set_feature_map_count(channels)
         .set_height(height)
         .set_width(width)
-        .set_layout(se::dnn::DataLayout::kBatchDepthYX);
+        .set_layout(data_layout);
 
     se::dnn::BatchDescriptor scale_offset_desc;
     scale_offset_desc.set_count(1)
@@ -350,7 +385,8 @@ struct FusedBatchNorm<GPUDevice, T, U> {
           errors::Internal("cuDNN launch failure : input shape (",
                            x.shape().DebugString(), ")"));
     }
-    if (tensor_format == FORMAT_NHWC) {
+
+    if (tensor_format == FORMAT_NHWC && compute_format == FORMAT_NCHW) {
       functor::NCHWToNHWC<GPUDevice, T, 4>()(
           context->eigen_device<GPUDevice>(),
           const_cast<const Tensor&>(y_transformed).tensor<T, 4>(),
@@ -367,7 +403,7 @@ struct FusedBatchNormGrad<GPUDevice, T, U> {
                   Tensor* scale_backprop, Tensor* offset_backprop,
                   TensorFormat tensor_format) {
     auto* stream = context->op_device_context()->stream();
-    OP_REQUIRES(context, stream, errors::Internal("No GPU stream avalible"));
+    OP_REQUIRES(context, stream, errors::Internal("No GPU stream available"));
 
     const int64 batch_size = GetTensorDim(x, tensor_format, 'N');
     const int64 channels = GetTensorDim(x, tensor_format, 'C');

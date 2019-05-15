@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import json
+import os
 
 from tensorflow.contrib.cloud.python.ops import gen_gcs_config_ops
 from tensorflow.python.framework import dtypes
@@ -62,7 +63,7 @@ class ConfigureGcsHook(training.SessionRunHook):
   Example:
 
   ```
-  sess = tf.Session()
+  sess = tf.compat.v1.Session()
   refresh_token = raw_input("Refresh token: ")
   client_secret = raw_input("Client secret: ")
   client_id = "<REDACTED>"
@@ -153,8 +154,8 @@ def configure_gcs(session, credentials=None, block_cache=None, device=None):
   at https://cloud.google.com/security/encryption-in-transit/.
 
   Args:
-    session: A `tf.Session` session that should be used to configure the GCS
-      file system.
+    session: A `tf.compat.v1.Session` session that should be used to configure
+      the GCS file system.
     credentials: [Optional.] A JSON string
     block_cache: [Optional.] A BlockCacheParams to configure the block cache .
     device: [Optional.] The device to place the configure ops.
@@ -185,9 +186,11 @@ def configure_colab_session(session):
   """ConfigureColabSession configures the GCS file system in Colab.
 
   Args:
-    session: A `tf.Session` session.
+    session: A `tf.compat.v1.Session` session.
   """
   # Read from the application default credentials (adc).
-  with open('/content/datalab/adc.json') as f:
+  adc_filename = os.environ.get(
+      'GOOGLE_APPLICATION_CREDENTIALS', '/content/adc.json')
+  with open(adc_filename) as f:
     data = json.load(f)
   configure_gcs(session, credentials=data)

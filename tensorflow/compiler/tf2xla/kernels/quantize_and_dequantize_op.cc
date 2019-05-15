@@ -18,11 +18,27 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/lib/arithmetic.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
+#include "tensorflow/compiler/xla/client/lib/constants.h"
+#include "tensorflow/compiler/xla/client/lib/math.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/core/platform/macros.h"
 
 namespace tensorflow {
 namespace {
+
+enum QuantizerRoundMode {
+  // Round half up: if the fraction of y is exactly 0.5, then
+  // round(y) = y + 0.5
+  // E.g., -5.5 gets rounded to -5, -5.4 goes to -5,
+  // 5.4 goes to 5, and 5.5 goes to 6.
+  ROUND_HALF_UP,
+  // Round half to even: if the fraction of y is exactly 0.5, then round(y) is
+  // the nearest even integer to y.
+  // E.g., 23.5 gets rounded to 24, 24.5 gets rounded to 24, while -23.5 becomes
+  // -24, and -24.5 gets rounded to 24.
+  ROUND_HALF_TO_EVEN,
+};
 
 class QuantizeAndDequantizeOp : public XlaOpKernel {
  public:
@@ -30,6 +46,7 @@ class QuantizeAndDequantizeOp : public XlaOpKernel {
       : XlaOpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("signed_input", &signed_input_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("range_given", &range_given_));
+    round_mode_ = ROUND_HALF_TO_EVEN;
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
@@ -50,8 +67,8 @@ class QuantizeAndDequantizeOp : public XlaOpKernel {
     } else {
       const xla::XlaComputation* fmax = ctx->GetOrCreateMax(data_type);
       const xla::XlaComputation* fmin = ctx->GetOrCreateMin(data_type);
-      min_range = ReduceAll(input, XlaHelpers::MaxValue(b, data_type), *fmin);
-      max_range = ReduceAll(input, XlaHelpers::MinValue(b, data_type), *fmax);
+      min_range = ReduceAll(input, xla::MaxValue(b, xla_type), *fmin);
+      max_range = ReduceAll(input, xla::MinValue(b, xla_type), *fmax);
     }
 
     xla::XlaOp num_bits;
@@ -93,10 +110,10 @@ class QuantizeAndDequantizeOp : public XlaOpKernel {
     // while keeping 0 unchanged.
     xla::XlaOp scale_from_min_side =
         Select(Gt(min_quantized * min_range, zero), min_quantized / min_range,
-               XlaHelpers::MaxFiniteValue(b, data_type));
+               xla::MaxFiniteValue(b, xla_type));
     xla::XlaOp scale_from_max_side =
         Select(Gt(max_quantized * max_range, zero), max_quantized / max_range,
-               XlaHelpers::MaxFiniteValue(b, data_type));
+               xla::MaxFiniteValue(b, xla_type));
 
     // Note: Avoids changing the side of the range that determines scale.
     xla::XlaOp cond = Lt(scale_from_min_side, scale_from_max_side);
@@ -115,8 +132,17 @@ class QuantizeAndDequantizeOp : public XlaOpKernel {
       // in that case they were measured from the tensor.
       input = Clamp(min_range, input, max_range);
     }
-    xla::XlaOp result =
-        Floor((input - min_range) * scale + half) * inverse_scale + min_range;
+    xla::XlaOp result;
+    switch (round_mode_) {
+      case ROUND_HALF_TO_EVEN: {
+        result = xla::RoundToEven(input * scale) * inverse_scale;
+        break;
+      }
+      case ROUND_HALF_UP: {
+        result = Floor(input * scale + half) * inverse_scale;
+        break;
+      }
+    }
     ctx->SetOutput(0, result);
   }
 
@@ -124,6 +150,7 @@ class QuantizeAndDequantizeOp : public XlaOpKernel {
   int64 num_bits_ = -1;
   bool signed_input_;
   bool range_given_;
+  QuantizerRoundMode round_mode_;
 };
 
 class QuantizeAndDequantizeV2Op : public QuantizeAndDequantizeOp {
@@ -134,6 +161,20 @@ class QuantizeAndDequantizeV2Op : public QuantizeAndDequantizeOp {
     OP_REQUIRES(ctx, num_bits_ > 0 && num_bits_ < (signed_input_ ? 62 : 63),
                 errors::InvalidArgument("num_bits is out of range: ", num_bits_,
                                         " with signed_input_ ", signed_input_));
+    string round_mode_string;
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("round_mode", &round_mode_string));
+    OP_REQUIRES(
+        ctx,
+        (round_mode_string == "HALF_UP" || round_mode_string == "HALF_TO_EVEN"),
+        errors::InvalidArgument("Round mode string must be "
+                                "'HALF_UP' or "
+                                "'HALF_TO_EVEN', is '" +
+                                round_mode_string + "'"));
+    if (round_mode_string == "HALF_UP") {
+      round_mode_ = ROUND_HALF_UP;
+    } else if (round_mode_string == "HALF_TO_EVEN") {
+      round_mode_ = ROUND_HALF_TO_EVEN;
+    }
   }
 };
 

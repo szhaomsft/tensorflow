@@ -13,16 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#if GOOGLE_CUDA
+#if GOOGLE_TENSORRT
+
 #include "tensorflow/contrib/tensorrt/custom_plugin_examples/inc_op_kernel.h"
 
 #include <vector>
 
+#define EIGEN_USE_GPU
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "tensorflow/core/framework/op_kernel.h"
-
-#if GOOGLE_CUDA
-#if GOOGLE_TENSORRT
-#include "cuda/include/cuda_runtime_api.h"
 #include "tensorflow/core/platform/stream_executor.h"
+#include "tensorflow/core/util/gpu_kernel_helper.h"
+#include "tensorflow/core/util/gpu_launch_config.h"
 
 namespace tensorflow {
 namespace tensorrt {
@@ -37,8 +40,8 @@ void IncrementKernel(const float* d_input, float inc, float* d_output,
   int threads_per_block = 256;
   int blocks_per_grid = (count + threads_per_block - 1) / threads_per_block;
 
-  VecInc<<<threads_per_block, blocks_per_grid, 0, stream>>>(d_input, inc,
-                                                            d_output, count);
+  TF_CHECK_OK(CudaLaunchKernel(VecInc, threads_per_block, blocks_per_grid, 0,
+                               stream, d_input, inc, d_output, count));
 }
 
 // Note: this kernel definition is not needed in the plugin_test rule, but it is
@@ -65,7 +68,7 @@ class IncPluginTRT : public OpKernel {
         reinterpret_cast<const cudaStream_t*>(context->op_device_context()
                                                   ->stream()
                                                   ->implementation()
-                                                  ->CudaStreamMemberHack()));
+                                                  ->GpuStreamMemberHack()));
     IncrementKernel(input_tensor.flat<float>().data(), inc_,
                     output_tensor->flat<float>().data(),
                     input_shape.num_elements(), *stream);
@@ -80,5 +83,5 @@ REGISTER_KERNEL_BUILDER(Name("IncPluginTRT").Device(DEVICE_GPU), IncPluginTRT);
 }  // namespace tensorrt
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
 #endif  // GOOGLE_TENSORRT
+#endif  // GOOGLE_CUDA

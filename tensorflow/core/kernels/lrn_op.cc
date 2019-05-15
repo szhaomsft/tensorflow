@@ -19,19 +19,23 @@ limitations under the License.
 #define EIGEN_USE_THREADS
 
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/kernels/bounds_check.h"
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/lib/core/errors.h"
+
+#if defined(TENSORFLOW_USE_CUSTOM_CONTRACTION_KERNEL)
+#include "tensorflow/core/kernels/eigen_contraction_kernel.h"
+#endif
 
 #if !defined(IS_MOBILE_PLATFORM)
 #include "tensorflow/core/util/work_sharder.h"
 #endif
 
 #if GOOGLE_CUDA
-#include "cuda/include/cuda.h"
+#include "third_party/gpus/cuda/include/cuda.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #include "tensorflow/core/util/stream_executor_util.h"
 #endif  // GOOGLE_CUDA

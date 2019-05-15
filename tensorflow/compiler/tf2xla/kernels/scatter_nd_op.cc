@@ -19,7 +19,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -110,13 +110,20 @@ class ScatterNdOp : public XlaOpKernel {
     auto updates = context->Input(1);
     auto result =
         XlaScatter(buffer, updates, indices,
-                   /*indices_are_vectors=*/true, /*combiner=*/{}, builder);
+                   /*indices_are_vectors=*/true, /*combiner=*/Combine, builder);
     OP_REQUIRES_OK(context, result.status());
     context->SetOutput(0, result.ValueOrDie());
   }
+
+ private:
+  static xla::XlaOp Combine(const xla::XlaOp& x, const xla::XlaOp& y,
+                            xla::XlaBuilder* builder) {
+    return xla::Add(x, y);
+  }
 };
 
-REGISTER_XLA_OP(Name("ScatterNd").CompileTimeConstInput("shape"), ScatterNdOp);
+REGISTER_XLA_OP(Name("ScatterNd").CompileTimeConstantInput("shape"),
+                ScatterNdOp);
 
 }  // namespace
 }  // namespace tensorflow

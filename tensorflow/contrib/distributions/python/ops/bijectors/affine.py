@@ -18,7 +18,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.contrib import linalg
 from tensorflow.contrib.distributions.python.ops import distribution_util
 from tensorflow.contrib.distributions.python.ops.shape import _DistributionShape
 from tensorflow.python.framework import dtypes
@@ -29,6 +28,7 @@ from tensorflow.python.ops import check_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.distributions import bijector
+from tensorflow.python.ops.linalg import linalg
 from tensorflow.python.util import deprecation
 
 
@@ -59,8 +59,8 @@ class Affine(bijector.Bijector):
 
   ```python
   scale = (
-    scale_identity_multiplier * tf.diag(tf.ones(d)) +
-    tf.diag(scale_diag) +
+    scale_identity_multiplier * tf.linalg.tensor_diag(tf.ones(d)) +
+    tf.linalg.tensor_diag(scale_diag) +
     scale_tril +
     scale_perturb_factor @ diag(scale_perturb_diag) @
       tf.transpose([scale_perturb_factor])
@@ -84,7 +84,7 @@ class Affine(bijector.Bijector):
   b = Affine(shift=[1., 2, 3],
              scale_identity_multiplier=2.)
 
-  # Y = tf.diag(d1) @ X.T + shift
+  # Y = tf.linalg.tensor_diag(d1) @ X.T + shift
   b = Affine(shift=[1., 2, 3],
              scale_diag=[-1., 2, 1])         # Implicitly 3x3.
 
@@ -136,8 +136,8 @@ class Affine(bijector.Bijector):
 
     ```python
     scale = (
-      scale_identity_multiplier * tf.diag(tf.ones(d)) +
-      tf.diag(scale_diag) +
+      scale_identity_multiplier * tf.linalg.tensor_diag(tf.ones(d)) +
+      tf.linalg.tensor_diag(scale_diag) +
       scale_tril +
       scale_perturb_factor @ diag(scale_perturb_diag) @
         tf.transpose([scale_perturb_factor])
@@ -147,7 +147,7 @@ class Affine(bijector.Bijector):
     If none of `scale_identity_multiplier`, `scale_diag`, or `scale_tril` are
     specified then `scale += IdentityMatrix`. Otherwise specifying a
     `scale` argument has the semantics of `scale += Expand(arg)`, i.e.,
-    `scale_diag != None` means `scale += tf.diag(scale_diag)`.
+    `scale_diag != None` means `scale += tf.linalg.tensor_diag(scale_diag)`.
 
     Args:
       shift: Floating-point `Tensor`. If this is set to `None`, no shift is

@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import functools
 import re
 import threading
@@ -26,13 +27,17 @@ import warnings
 import numpy as np
 
 from tensorflow.core.protobuf import config_pb2
+from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python import pywrap_tensorflow as tf_session
+from tensorflow.python.eager import context
 from tensorflow.python.framework import device
+from tensorflow.python.framework import error_interpolation
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.ops import session_ops
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.training.experimental import mixed_precision_global_state
 from tensorflow.python.util import compat
 from tensorflow.python.util import nest
 from tensorflow.python.util.tf_export import tf_export
@@ -176,14 +181,28 @@ def register_session_run_conversion_functions(
     feed_function_for_partial_run: A callable for specifying tensor values to
       feed when setting up a partial run, which takes a `tensor_type` type
       object as input, and returns a list of Tensors.
+
+  Raises:
+    ValueError: If `tensor_type` has already been registered.
   """
   for conversion_function in _REGISTERED_EXPANSIONS:
     if issubclass(conversion_function[0], tensor_type):
-      raise ValueError('%s has already been registered so ignore it.',
+      raise ValueError('%s has already been registered so ignore it.' %
                        tensor_type)
-      return
+
   _REGISTERED_EXPANSIONS.insert(0, (tensor_type, fetch_function, feed_function,
                                     feed_function_for_partial_run))
+
+
+def _is_attrs_instance(obj):
+  """Returns True if the given obj is an instance of attrs-decorated class."""
+  return getattr(obj.__class__, '__attrs_attrs__', None) is not None
+
+
+def _get_attrs_values(obj):
+  """Returns the list of values from an attrs instance."""
+  attrs = getattr(obj.__class__, '__attrs_attrs__')
+  return [getattr(obj, a.name) for a in attrs]
 
 
 class _FetchMapper(object):
@@ -243,8 +262,10 @@ class _FetchMapper(object):
     elif isinstance(fetch, (list, tuple)):
       # NOTE(touts): This is also the code path for namedtuples.
       return _ListFetchMapper(fetch)
-    elif isinstance(fetch, dict):
+    elif isinstance(fetch, collections.Mapping):
       return _DictFetchMapper(fetch)
+    elif _is_attrs_instance(fetch):
+      return _AttrsFetchMapper(fetch)
     else:
       # Look for a handler in the registered expansions.
       for tensor_type, fetch_fn, _, _ in _REGISTERED_EXPANSIONS:
@@ -361,7 +382,7 @@ class _ListFetchMapper(_FetchMapper):
     for m, vi in zip(self._mappers, self._value_indices):
       results.append(m.build_results([values[j] for j in vi]))
     # Return a value of the original type of the fetches.
-    if self._fetch_type == list:
+    if issubclass(self._fetch_type, list):
       return results
     elif self._fetch_type == tuple:
       return tuple(results)
@@ -394,6 +415,32 @@ class _DictFetchMapper(_FetchMapper):
     for k, m, vi in zip(self._keys, self._mappers, self._value_indices):
       results[k] = m.build_results([values[j] for j in vi])
     return results
+
+
+class _AttrsFetchMapper(_FetchMapper):
+  """Fetch mapper for attrs decorated classes."""
+
+  def __init__(self, fetches):
+    """Creates a _AttrsFetchMapper.
+
+    Args:
+      fetches: An instance of an attrs decorated class.
+    """
+    values = _get_attrs_values(fetches)
+    self._fetch_type = type(fetches)
+    self._mappers = [
+        _FetchMapper.for_fetch(fetch) for fetch in values
+    ]
+    self._unique_fetches, self._value_indices = _uniquify_fetches(self._mappers)
+
+  def unique_fetches(self):
+    return self._unique_fetches
+
+  def build_results(self, values):
+    results = []
+    for m, vi in zip(self._mappers, self._value_indices):
+      results.append(m.build_results([values[j] for j in vi]))
+    return self._fetch_type(*results)
 
 
 class _FetchHandler(object):
@@ -540,10 +587,11 @@ class _DeviceAttributes(object):
         (in bytes).
   """
 
-  def __init__(self, name, device_type, memory_limit_bytes):
+  def __init__(self, name, device_type, memory_limit_bytes, incarnation):
     self._name = device.canonical_name(name)
     self._device_type = device_type
     self._memory_limit_bytes = memory_limit_bytes
+    self._incarnation = incarnation
 
   @property
   def name(self):
@@ -557,11 +605,16 @@ class _DeviceAttributes(object):
   def memory_limit_bytes(self):
     return self._memory_limit_bytes
 
+  @property
+  def incarnation(self):
+    return self._incarnation
+
   def __repr__(self):
-    return '_DeviceAttributes(%s, %s, %d)' % (
+    return '_DeviceAttributes(%s, %s, %d, %d)' % (
         self.name,
         self.device_type,
         self.memory_limit_bytes,
+        self.incarnation,
     )
 
 
@@ -579,7 +632,9 @@ class BaseSession(SessionInterface):
       target: (Optional) The TensorFlow execution engine to connect to.
       graph: (Optional) The graph to be used. If this argument is None,
         the default graph will be used.
-      config: (Optional) ConfigProto proto used to configure the session.
+      config: (Optional) ConfigProto proto used to configure the session. If no
+        config is specified, the global default will be used. The global
+        default can be configured via the tf.config APIs.
 
     Raises:
       tf.errors.OpError: Or one of its subclasses if an error occurs while
@@ -609,21 +664,33 @@ class BaseSession(SessionInterface):
     self._delete_lock = threading.Lock()
     self._dead_handles = []
 
-    if config is not None:
-      if not isinstance(config, config_pb2.ConfigProto):
-        raise TypeError(
-            'config must be a tf.ConfigProto, but got %s' % type(config))
-      self._config = config
-      self._add_shapes = config.graph_options.infer_shapes
-    else:
-      self._config = None
-      self._add_shapes = False
+    if config is None:
+      config = context.context().config
+
+    if not isinstance(config, config_pb2.ConfigProto):
+      raise TypeError(
+          'config must be a tf.ConfigProto, but got %s' % type(config))
+
+    if (mixed_precision_global_state.mixed_precision_is_enabled and
+        config.graph_options.rewrite_options.auto_mixed_precision !=
+        rewriter_config_pb2.RewriterConfig.OFF):
+      new_config = config_pb2.ConfigProto()
+      new_config.CopyFrom(config)
+      new_config.graph_options.rewrite_options.auto_mixed_precision = (
+          rewriter_config_pb2.RewriterConfig.ON)
+      config = new_config
+    elif (config.graph_options.rewrite_options.auto_mixed_precision !=
+          rewriter_config_pb2.RewriterConfig.ON):
+      mixed_precision_global_state.non_mixed_precision_session_created = True
+
+    self._config = config
+    self._add_shapes = config.graph_options.infer_shapes
 
     self._session = None
     opts = tf_session.TF_NewSessionOptions(target=self._target, config=config)
     try:
       # pylint: disable=protected-access
-      self._session = tf_session.TF_NewSession(self._graph._c_graph, opts)
+      self._session = tf_session.TF_NewSessionRef(self._graph._c_graph, opts)
       # pylint: enable=protected-access
     finally:
       tf_session.TF_DeleteSessionOptions(opts)
@@ -637,13 +704,15 @@ class BaseSession(SessionInterface):
       print(d.name)
     ```
 
-    Each element in the list has the following properties:
-     - `name`: A string with the full name of the device. ex:
+    Where:
+      Each element in the list has the following properties
+      name: A string with the full name of the device. ex:
           `/job:worker/replica:0/task:3/device:CPU:0`
-     - `device_type`: The type of the device (e.g. `CPU`, `GPU`, `TPU`.)
-     - `memory_limit`: The maximum amount of memory available on the device.
+      device_type: The type of the device (e.g. `CPU`, `GPU`, `TPU`.)
+      memory_limit: The maximum amount of memory available on the device.
           Note: depending on the device, it is possible the usable memory could
           be substantially less.
+
     Raises:
       tf.errors.OpError: If it encounters an error (e.g. session is in an
       invalid state, or network errors occur).
@@ -658,7 +727,9 @@ class BaseSession(SessionInterface):
       name = tf_session.TF_DeviceListName(raw_device_list, i)
       device_type = tf_session.TF_DeviceListType(raw_device_list, i)
       memory = tf_session.TF_DeviceListMemoryBytes(raw_device_list, i)
-      device_list.append(_DeviceAttributes(name, device_type, memory))
+      incarnation = tf_session.TF_DeviceListIncarnation(raw_device_list, i)
+      device_list.append(
+          _DeviceAttributes(name, device_type, memory, incarnation))
     tf_session.TF_DeleteDeviceList(raw_device_list)
     return device_list
 
@@ -684,10 +755,11 @@ class BaseSession(SessionInterface):
     if self._session is not None:
       try:
         tf_session.TF_DeleteSession(self._session)
-      except AttributeError:
-        # At shutdown, `c_api_util` or `tf_session` may have been garbage
-        # collected, causing the above method calls to fail. In this case,
-        # silently leak since the program is about to terminate anyway.
+      except (AttributeError, TypeError):
+        # At shutdown, `c_api_util`, `tf_session`, or
+        # `tf_session.TF_DeleteSession` may have been garbage collected, causing
+        # the above method calls to fail. In this case, silently leak since the
+        # program is about to terminate anyway.
         pass
       self._session = None
 
@@ -714,19 +786,19 @@ class BaseSession(SessionInterface):
     """Returns a context manager that makes this object the default session.
 
     Use with the `with` keyword to specify that calls to
-    @{tf.Operation.run} or @{tf.Tensor.eval} should be executed in
+    `tf.Operation.run` or `tf.Tensor.eval` should be executed in
     this session.
 
     ```python
     c = tf.constant(..)
-    sess = tf.Session()
+    sess = tf.compat.v1.Session()
 
     with sess.as_default():
-      assert tf.get_default_session() is sess
+      assert tf.compat.v1.get_default_session() is sess
       print(c.eval())
     ```
 
-    To get the current default session, use @{tf.get_default_session}.
+    To get the current default session, use `tf.compat.v1.get_default_session`.
 
     *N.B.* The `as_default` context manager *does not* close the
     session when you exit the context, and you must close the session
@@ -734,7 +806,7 @@ class BaseSession(SessionInterface):
 
     ```python
     c = tf.constant(...)
-    sess = tf.Session()
+    sess = tf.compat.v1.Session()
     with sess.as_default():
       print(c.eval())
     # ...
@@ -744,7 +816,7 @@ class BaseSession(SessionInterface):
     sess.close()
     ```
 
-    Alternatively, you can use `with tf.Session():` to create a
+    Alternatively, you can use `with tf.compat.v1.Session():` to create a
     session that is automatically closed on exiting the context,
     including when an uncaught exception is raised.
 
@@ -755,9 +827,10 @@ class BaseSession(SessionInterface):
 
     *N.B.* Entering a `with sess.as_default():` block does not affect
     the current default graph. If you are using multiple graphs, and
-    `sess.graph` is different from the value of @{tf.get_default_graph},
-    you must explicitly enter a `with sess.graph.as_default():` block
-    to make `sess.graph` the default graph.
+    `sess.graph` is different from the value of
+    `tf.compat.v1.get_default_graph`, you must explicitly enter a
+    `with sess.graph.as_default():` block to make `sess.graph` the default
+    graph.
 
     Returns:
       A context manager using this session as the default session.
@@ -776,14 +849,14 @@ class BaseSession(SessionInterface):
     nested list, tuple, namedtuple, dict, or OrderedDict containing graph
     elements at its leaves.  A graph element can be one of the following types:
 
-    * An @{tf.Operation}.
+    * A `tf.Operation`.
       The corresponding fetched value will be `None`.
-    * A @{tf.Tensor}.
+    * A `tf.Tensor`.
       The corresponding fetched value will be a numpy ndarray containing the
       value of that tensor.
-    * A @{tf.SparseTensor}.
+    * A `tf.SparseTensor`.
       The corresponding fetched value will be a
-      @{tf.SparseTensorValue}
+      `tf.compat.v1.SparseTensorValue`
       containing the value of that sparse tensor.
     * A `get_tensor_handle` op.  The corresponding fetched value will be a
       numpy ndarray containing the handle of that tensor.
@@ -819,16 +892,16 @@ class BaseSession(SessionInterface):
     the value of tensors in the graph. Each key in `feed_dict` can be
     one of the following types:
 
-    * If the key is a @{tf.Tensor}, the
+    * If the key is a `tf.Tensor`, the
       value may be a Python scalar, string, list, or numpy ndarray
       that can be converted to the same `dtype` as that
       tensor. Additionally, if the key is a
-      @{tf.placeholder}, the shape of
+      `tf.compat.v1.placeholder`, the shape of
       the value will be checked for compatibility with the placeholder.
     * If the key is a
-      @{tf.SparseTensor},
+      `tf.SparseTensor`,
       the value should be a
-      @{tf.SparseTensorValue}.
+      `tf.compat.v1.SparseTensorValue`.
     * If the key is a nested tuple of `Tensor`s or `SparseTensor`s, the value
       should be a nested tuple with the same structure that maps to their
       corresponding values as above.
@@ -1045,7 +1118,7 @@ class BaseSession(SessionInterface):
           if isinstance(subfeed_val, ops.Tensor):
             raise TypeError('The value of a feed cannot be a tf.Tensor object. '
                             'Acceptable feed values include Python scalars, '
-                            'strings, lists, numpy ndarrays, or TensorHandles.'
+                            'strings, lists, numpy ndarrays, or TensorHandles. '
                             'For reference, the tensor object was ' +
                             str(feed_val) + ' which was passed to the '
                             'feed with key ' + str(feed) + '.')
@@ -1110,7 +1183,7 @@ class BaseSession(SessionInterface):
     For example, if element `i` of `feed_list` is a `tf.Tensor`, the `i`th
     argument to the returned callable must be a numpy ndarray (or something
     convertible to an ndarray) with matching element type and shape. See
-    @{tf.Session.run} for details of the allowable feed key and value types.
+    `tf.Session.run` for details of the allowable feed key and value types.
 
     The returned callable will have the same return type as
     `tf.Session.run(fetches, ...)`. For example, if `fetches` is a `tf.Tensor`,
@@ -1118,16 +1191,17 @@ class BaseSession(SessionInterface):
     it will return `None`.
 
     Args:
-      fetches: A value or list of values to fetch. See @{tf.Session.run}
+      fetches: A value or list of values to fetch. See `tf.Session.run`
         for details of the allowable fetch types.
       feed_list: (Optional.) A list of `feed_dict` keys. See
-        @{tf.Session.run} for details of the allowable feed key types.
-      accept_options: (Optional.) Iff `True`, the returned `Callable` will be
-        able to accept @{tf.RunOptions} and @{tf.RunMetadata} as optional
-        keyword arguments `options` and `run_metadata`, respectively, with
-        the same syntax and semantics as @{tf.Session.run}, which is useful
-        for certain use cases (profiling and debugging) but will result in
-        measurable slowdown of the `Callable`'s performance. Default: `False`.
+        `tf.Session.run` for details of the allowable feed key types.
+      accept_options: (Optional.) If `True`, the returned `Callable` will be
+        able to accept `tf.compat.v1.RunOptions` and `tf.compat.v1.RunMetadata`
+        as optional keyword arguments `options` and `run_metadata`,
+        respectively, with the same syntax and semantics as `tf.Session.run`,
+        which is useful for certain use cases (profiling and debugging) but
+        will result in measurable slowdown of the `Callable`'s
+        performance. Default: `False`.
 
     Returns:
       A function that when called will execute the step defined by
@@ -1135,7 +1209,7 @@ class BaseSession(SessionInterface):
 
     Raises:
       TypeError: If `fetches` or `feed_list` cannot be interpreted
-        as arguments to @{tf.Session.run}.
+        as arguments to `tf.Session.run`.
     """
     if feed_list is not None:
       if not isinstance(feed_list, (list, tuple)):
@@ -1226,8 +1300,12 @@ class BaseSession(SessionInterface):
 
       return _fetch_handler_run
 
-  # Captures the name of a node in an error status.
-  _NODEDEF_NAME_RE = re.compile(r'\[\[Node: ([^ ]*?) =')
+  # Captures the name of a node in an error status. The regex below matches
+  # both the old and the new formats:
+  # Old format: [[Node: <node_name> = ...]]
+  # New format: [[{{node <node_name>}} = ...]]
+  _NODEDEF_NAME_RE = re.compile(
+      r'\[\[(Node: )?(\{\{node )?([^\} ]*)(\}\})?\s*=*')
 
   def _do_run(self, handle, target_list, fetch_list, feed_dict, options,
               run_metadata):
@@ -1282,12 +1360,13 @@ class BaseSession(SessionInterface):
       node_def = None
       op = None
       if m is not None:
-        node_name = m.group(1)
+        node_name = m.group(3)
         try:
           op = self._graph.get_operation_by_name(node_name)
           node_def = op.node_def
         except KeyError:
           pass
+      message = error_interpolation.interpolate(message, self._graph)
       raise type(e)(node_def, op, message)
 
   def _extend_graph(self):
@@ -1363,9 +1442,8 @@ class BaseSession(SessionInterface):
       options_ptr = tf_session.TF_NewBufferFromString(
           compat.as_bytes(callable_options.SerializeToString()))
       try:
-        with errors.raise_exception_on_not_ok_status() as status:
-          self._handle = tf_session.TF_SessionMakeCallable(
-              session._session, options_ptr, status)
+        self._handle = tf_session.TF_SessionMakeCallable(
+            session._session, options_ptr)
       finally:
         tf_session.TF_DeleteBuffer(options_ptr)
 
@@ -1375,11 +1453,9 @@ class BaseSession(SessionInterface):
       run_metadata = kwargs.get('run_metadata', None)
       try:
         run_metadata_ptr = tf_session.TF_NewBuffer() if run_metadata else None
-        # TODO(mrry): Switch to raising an exception from the SWIG wrapper.
-        with errors.raise_exception_on_not_ok_status() as status:
-          ret = tf_session.TF_SessionRunCallable(
-              self._session._session, self._handle, args, status,
-              run_metadata_ptr)
+        ret = tf_session.TF_SessionRunCallable(self._session._session,
+                                               self._handle, args,
+                                               run_metadata_ptr)
         if run_metadata:
           proto_data = tf_session.TF_GetBuffer(run_metadata_ptr)
           run_metadata.ParseFromString(compat.as_bytes(proto_data))
@@ -1393,9 +1469,8 @@ class BaseSession(SessionInterface):
       # called before this destructor, in which case `self._session._session`
       # will be `None`.
       if self._handle is not None and self._session._session is not None:
-        with errors.raise_exception_on_not_ok_status() as status:
-          tf_session.TF_SessionReleaseCallable(
-              self._session._session, self._handle, status)
+        tf_session.TF_SessionReleaseCallable(
+            self._session._session, self._handle)
   # pylint: enable=protected-access
 
   # TODO(b/74355905): Reimplement `Session.make_callable()` using this method
@@ -1414,7 +1489,7 @@ class BaseSession(SessionInterface):
     return BaseSession._Callable(self, callable_options)
 
 
-@tf_export('Session')
+@tf_export(v1=['Session'])
 class Session(BaseSession):
   """A class for running TensorFlow operations.
 
@@ -1429,28 +1504,28 @@ class Session(BaseSession):
   c = a * b
 
   # Launch the graph in a session.
-  sess = tf.Session()
+  sess = tf.compat.v1.Session()
 
   # Evaluate the tensor `c`.
   print(sess.run(c))
   ```
 
   A session may own resources, such as
-  @{tf.Variable}, @{tf.QueueBase},
-  and @{tf.ReaderBase}. It is important to release
+  `tf.Variable`, `tf.queue.QueueBase`,
+  and `tf.compat.v1.ReaderBase`. It is important to release
   these resources when they are no longer required. To do this, either
-  invoke the @{tf.Session.close} method on the session, or use
+  invoke the `tf.Session.close` method on the session, or use
   the session as a context manager. The following two examples are
   equivalent:
 
   ```python
   # Using the `close()` method.
-  sess = tf.Session()
+  sess = tf.compat.v1.Session()
   sess.run(...)
   sess.close()
 
   # Using the context manager.
-  with tf.Session() as sess:
+  with tf.compat.v1.Session() as sess:
     sess.run(...)
   ```
 
@@ -1464,8 +1539,9 @@ class Session(BaseSession):
   ```python
   # Launch the graph in a session that allows soft device placement and
   # logs the placement decisions.
-  sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True,
-                                          log_device_placement=True))
+  sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(
+      allow_soft_placement=True,
+      log_device_placement=True))
   ```
   """
 
@@ -1474,7 +1550,7 @@ class Session(BaseSession):
 
     If no `graph` argument is specified when constructing the session,
     the default graph will be launched in the session. If you are
-    using more than one graph (created with `tf.Graph()` in the same
+    using more than one graph (created with `tf.Graph()`) in the same
     process, you will have to use different sessions for each graph,
     but each graph can be used in multiple sessions. In this case, it
     is often clearer to pass the graph to be launched explicitly to
@@ -1483,7 +1559,7 @@ class Session(BaseSession):
     Args:
       target: (Optional.) The execution engine to connect to.
         Defaults to using an in-process engine. See
-        @{$distributed$Distributed TensorFlow}
+        [Distributed TensorFlow](https://tensorflow.org/deploy/distributed)
         for more examples.
       graph: (Optional.) The `Graph` to be launched (described above).
       config: (Optional.) A
@@ -1532,7 +1608,21 @@ class Session(BaseSession):
     self._default_session_context_manager = None
     self._default_graph_context_manager = None
 
-    self.close()
+    # If we are closing due to an exception, set a time limit on our Close() to
+    # avoid blocking forever.
+    # TODO(b/120204635) remove this when deadlock is fixed.
+    if exec_type:
+      close_thread = threading.Thread(
+          name='SessionCloseThread', target=self.close)
+      close_thread.daemon = True
+      close_thread.start()
+      close_thread.join(30.0)
+      if close_thread.is_alive():
+        logging.error(
+            'Session failed to close after 30 seconds. Continuing after this '
+            'point may leave your program in an undefined state.')
+    else:
+      self.close()
 
   @staticmethod
   def reset(target, containers=None, config=None):
@@ -1569,14 +1659,14 @@ class Session(BaseSession):
     tf_session.TF_Reset(target, containers, config)
 
 
-@tf_export('InteractiveSession')
+@tf_export(v1=['InteractiveSession'])
 class InteractiveSession(BaseSession):
   """A TensorFlow `Session` for use in interactive contexts, such as a shell.
 
   The only difference with a regular `Session` is that an `InteractiveSession`
   installs itself as the default session on construction.
-  The methods @{tf.Tensor.eval}
-  and @{tf.Operation.run}
+  The methods `tf.Tensor.eval`
+  and `tf.Operation.run`
   will use that session to run ops.
 
   This is convenient in interactive shells and [IPython
@@ -1586,7 +1676,7 @@ class InteractiveSession(BaseSession):
   For example:
 
   ```python
-  sess = tf.InteractiveSession()
+  sess = tf.compat.v1.InteractiveSession()
   a = tf.constant(5.0)
   b = tf.constant(6.0)
   c = a * b
@@ -1603,7 +1693,7 @@ class InteractiveSession(BaseSession):
   a = tf.constant(5.0)
   b = tf.constant(6.0)
   c = a * b
-  with tf.Session():
+  with tf.compat.v1.Session():
     # We can also use 'c.eval()' here.
     print(c.eval())
   ```
@@ -1617,7 +1707,7 @@ class InteractiveSession(BaseSession):
 
     If no `graph` argument is specified when constructing the session,
     the default graph will be launched in the session. If you are
-    using more than one graph (created with `tf.Graph()` in the same
+    using more than one graph (created with `tf.Graph()`) in the same
     process, you will have to use different sessions for each graph,
     but each graph can be used in multiple sessions. In this case, it
     is often clearer to pass the graph to be launched explicitly to
